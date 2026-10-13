@@ -257,13 +257,21 @@ function installWebMotion(): () => void {
   let passiveFrame = 0;
   let quietUntil = 0;
   let workspaceQuietUntil = 0;
-  let pointerOrigin: { x: number; y: number } | null = null;
+  // Tab reordering commits after pointerup. Preserve its pre-drag baseline so
+  // `updateTabs` can FLIP the committed order instead of rebasing it away.
+  let pointerOrigin: { x: number; y: number; tabRow: Element | null; tabChip: Element | null } | null = null;
   let suspended = document.hidden || !document.hasFocus();
   let composing = false;
   const panelExits = new Set<Element>();
   const panelEntries = new Set<Element>();
   const active = new Map<Element, () => void>();
   const ghosts = new Set<Element>();
+  let tabDragRestore: (() => void) | null = null;
+  let tabDragRestoreTimer = 0;
+  let followTabDrag: ((pointerX: number) => void) | null = null;
+  let tabDragRebasePending = false;
+  let tabDragRow: Element | null = null;
+  let tabDragRebaseRow: Element | null = null;
   let edgePeek: ReturnType<typeof installEdgePeek> | null = null;
   const motionReady = () => !disposed && !suspended && !edgePeek?.isTransitioning() && getPreferences().enabled && !reduceMotion.matches;
   // Layout captures stay off while an edge preview is open; its scrolling is
@@ -303,6 +311,17 @@ function installWebMotion(): () => void {
         if (value) el.style.setProperty(key, value, priority);
         else el.style.removeProperty(key);
       }
+    };
+  }
+  function temporaryImportantStyle(el: Element, property: string, value: string): () => void {
+    const previous = el.style.getPropertyValue(property);
+    const priority = el.style.getPropertyPriority(property);
+    el.style.setProperty(property, value, 'important');
+    return () => {
+      // dnd-kit may have written its own style since this drag started.
+      if (el.style.getPropertyValue(property) !== value || el.style.getPropertyPriority(property) !== 'important') return;
+      if (previous) el.style.setProperty(property, previous, priority);
+      else el.style.removeProperty(property);
     };
   }
   function exitCopy(before: Snapshot): Element {
@@ -648,7 +667,22 @@ function installWebMotion(): () => void {
         const left = active.has(slot) && previous ? previous.left : shot.box.left - scrollLeft + scroll.scrollLeft;
         next.set(key, { chip, shot, left });
       }
+      // The custom drag track owns the live slots. Do not overwrite their
+      // clean pre-drag baseline with transformed measurements mid-drag.
+      if (tabDragRestore && tabDragRow === scroll) {
+        nextRows.set(scroll, old ?? next);
+        continue;
+      }
       nextRows.set(scroll, next);
+      // After dnd-kit commits the new order, retain it as the next baseline.
+      // The live vacancy already animated the movement; a second FLIP pass
+      // would replay the old slot as an exit/entry underneath it.
+      if (tabDragRebasePending && tabDragRebaseRow === scroll) {
+        tabDragRebasePending = false;
+        tabDragRebaseRow = null;
+        tabDragRow = null;
+        continue;
+      }
       if (!allow || !getPreferences().tabs || !old || Date.now() < quietUntil || hasAncestor(scroll, active.keys())) continue;
       const removed = Array.from(old).filter(([key]) => !next.has(key));
       const added = Array.from(next).filter(([key]) => !old.has(key));
@@ -673,6 +707,100 @@ function installWebMotion(): () => void {
       }
     }
     tabRows = nextRows;
+  }
+  function clearTabDragMotion() {
+    window.clearTimeout(tabDragRestoreTimer);
+    tabDragRestoreTimer = 0;
+    followTabDrag = null;
+    tabDragRestore?.();
+    tabDragRestore = null;
+  }
+  function beginTabDragMotion(scroll: Element, chip: Element, startX: number) {
+    if (tabDragRestore || !getPreferences().tabs || !canAnimate()) return;
+    const draggedSlot = tabSlot(chip, scroll);
+    const slots = all(scroll, TAB)
+      .filter(visible)
+      .slice(0, 80)
+      .map(tab => tabSlot(tab, scroll))
+      .filter((slot, index, items) => items.indexOf(slot) === index)
+      .map(slot => ({ slot, left: rect(slot).left, width: rect(slot).width }));
+    const draggedIndex = slots.findIndex(item => item.slot === draggedSlot);
+    if (draggedIndex < 0) return;
+    tabDragRow = scroll;
+    const restores: Array<() => void> = [];
+    const transforms = new Map<Element, { previous: string; priority: string; owned: string }>();
+    const hiddenIndicators = new Set<Element>();
+    const hideSamePaneDropIndicators = () => {
+      // ux-polish does not render its accent insertion pill for a same-pane
+      // drag: the shifting tabs themselves communicate the target. Paseo
+      // exposes no test id for that pill, so identify its stable geometry.
+      for (const candidate of all(scroll, '*')) {
+        if (hiddenIndicators.has(candidate)) continue;
+        const box = rect(candidate);
+        const style = window.getComputedStyle(candidate);
+        if (
+          box.width > 6 || box.height < 12 ||
+          style.getPropertyValue('position') !== 'absolute' ||
+          style.getPropertyValue('pointer-events') !== 'none'
+        ) continue;
+        hiddenIndicators.add(candidate);
+        restores.push(temporaryImportantStyle(candidate, 'opacity', '0'));
+      }
+    };
+    for (const { slot } of slots) {
+      // This mirrors ux-polish's SortableItem: the held tab tracks the
+      // pointer directly, while its siblings ease each new dnd-kit transform.
+      if (slot === draggedSlot) {
+        restores.push(
+          temporaryImportantStyle(slot, 'transition', 'none'),
+          // The host's drag overlay owns the held tab's visible pixels.
+          // Hide this source slot so it does not linger at its old position.
+          temporaryImportantStyle(slot, 'opacity', '0'),
+          temporaryImportantStyle(chip, 'opacity', '0'),
+          temporaryImportantStyle(slot, 'z-index', '1000'),
+        );
+      } else {
+        restores.push(temporaryImportantStyle(slot, 'transition', 'transform 200ms ease'));
+      }
+    }
+    followTabDrag = (pointerX) => {
+      hideSamePaneDropIndicators();
+      const dragged = slots[draggedIndex];
+      const draggedCenter = dragged.left + dragged.width / 2 + pointerX - startX;
+      let targetIndex = draggedIndex;
+      let closestDistance = Infinity;
+      for (const [index, item] of slots.entries()) {
+        const distance = Math.abs(item.left + item.width / 2 - draggedCenter);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          targetIndex = index;
+        }
+      }
+      const displayOrder = slots.map((_, index) => index);
+      displayOrder.splice(draggedIndex, 1);
+      displayOrder.splice(targetIndex, 0, draggedIndex);
+      for (const [index, item] of slots.entries()) {
+        if (index === draggedIndex) continue;
+        const destination = displayOrder.indexOf(index);
+        const delta = slots[destination].left - item.left;
+        const owned = transforms.get(item.slot) ?? {
+          previous: item.slot.style.getPropertyValue('transform'),
+          priority: item.slot.style.getPropertyPriority('transform'),
+          owned: '',
+        };
+        owned.owned = `translateX(${delta}px)`;
+        transforms.set(item.slot, owned);
+        item.slot.style.setProperty('transform', owned.owned, 'important');
+      }
+    };
+    tabDragRestore = () => {
+      for (const [slot, transform] of transforms) {
+        if (slot.style.getPropertyValue('transform') !== transform.owned || slot.style.getPropertyPriority('transform') !== 'important') continue;
+        if (transform.previous) slot.style.setProperty('transform', transform.previous, transform.priority);
+        else slot.style.removeProperty('transform');
+      }
+      for (const restore of restores.reverse()) restore();
+    };
   }
   function floatingExit(before: Snapshot) {
     const copy = exitCopy(before);
@@ -939,6 +1067,8 @@ function installWebMotion(): () => void {
   observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'role', 'aria-hidden', 'aria-expanded', 'aria-selected', 'aria-busy', 'data-status-bucket'] });
   function clearCapture() {
     pending = null; treeTarget = null; pointerOrigin = null; layoutPolling = 0;
+    tabDragRebasePending = false; tabDragRow = null; tabDragRebaseRow = null;
+    clearTabDragMotion();
     window.clearTimeout(deadline); deadline = 0;
     window.cancelAnimationFrame(frame); frame = 0;
   }
@@ -981,7 +1111,14 @@ function installWebMotion(): () => void {
     stopAll();
     window.cancelAnimationFrame(passiveFrame); passiveFrame = 0; dirty.clear();
     refreshAmbient(false);
-    if (!event.key && event.clientX !== undefined && event.clientY !== undefined) pointerOrigin = { x: event.clientX, y: event.clientY };
+    if (!event.key && event.clientX !== undefined && event.clientY !== undefined) {
+      pointerOrigin = {
+        x: event.clientX,
+        y: event.clientY,
+        tabRow: target?.closest(TAB_ROW) ?? null,
+        tabChip: target?.closest(TAB) ?? null,
+      };
+    }
     layoutPolling = 0;
     // Shortcuts have no pointerup/click commit; poll for the async commit.
     if (event.key && (event.metaKey || event.ctrlKey)) layoutPolling = 12;
@@ -1012,20 +1149,40 @@ function installWebMotion(): () => void {
     if (suspended && !document.hidden && document.hasFocus()) resumeMotion();
     if (!pointerOrigin || event.buttons !== 1) return;
     if (Math.abs((event.clientX ?? pointerOrigin.x) - pointerOrigin.x) + Math.abs((event.clientY ?? pointerOrigin.y) - pointerOrigin.y) < 6) return;
-    quietUntil = Date.now() + 250;
+    const tabRow = pointerOrigin.tabRow;
+    const tabChip = pointerOrigin.tabChip;
+    if (tabRow && tabChip) {
+      // Reserve the held tab's slot immediately. As its center crosses each
+      // neighbor, move the neighboring slots into that vacancy just like
+      // ux-polish's sortable track does.
+      const pointerX = event.clientX ?? pointerOrigin.x;
+      beginTabDragMotion(tabRow, tabChip, pointerOrigin.x);
+      followTabDrag?.(pointerX);
+    } else quietUntil = Date.now() + 250;
     pending = null; treeTarget = null; stopAll();
   };
-  const onReduce = () => { edgePeek?.refresh(); updateMotionFlags(); if (reduceMotion.matches) { pending = null; stopAll(); refreshAmbient(false); } };
+  const onReduce = () => { edgePeek?.refresh(); updateMotionFlags(); if (reduceMotion.matches) { pending = null; clearTabDragMotion(); stopAll(); refreshAmbient(false); } };
   const unsubscribe = subscribePreferences(() => {
     try { window.localStorage.setItem(PREF_KEY, JSON.stringify(getPreferences())); } catch { /* optional persistence */ }
     edgePeek?.refresh();
-    pending = null; stopAll(); updateMotionFlags(); refreshAmbient(false);
+    pending = null; clearTabDragMotion(); stopAll(); updateMotionFlags(); refreshAmbient(false);
   });
   // RN Pressable / gesture handlers may commit on pointerup, before the DOM
   // click arrives. Measuring in click capture sees the final layout already.
   // Pointerdown establishes the old layout; click is only an AX fallback.
   const onCommit: Listener = (event) => {
+    const hadTabDrag = tabDragRestore !== null;
+    const draggedTabRow = pointerOrigin?.tabRow ?? tabDragRow;
     pointerOrigin = null;
+    if (hadTabDrag) {
+      tabDragRebasePending = true;
+      tabDragRebaseRow = draggedTabRow;
+      // Let dnd-kit clear its final transform first. The reference disables
+      // the sibling transition at this point so the live drag slide is not
+      // replayed after drop.
+      window.clearTimeout(tabDragRestoreTimer);
+      tabDragRestoreTimer = window.setTimeout(clearTabDragMotion, 0);
+    }
     if (!capturesInput(event)) return;
     if (Date.now() < quietUntil) { refreshAmbient(false); return; }
     if (!pending) begin(event);
@@ -1123,7 +1280,7 @@ function installWebMotion(): () => void {
     window.removeEventListener('focus', onWindowFocus);
     reduceMotion.removeEventListener('change', onReduce);
     window.clearTimeout(deadline); window.cancelAnimationFrame(frame); window.cancelAnimationFrame(passiveFrame);
-    window.clearTimeout(scrollDeadline); dirty.clear();
+    window.clearTimeout(scrollDeadline); clearTabDragMotion(); dirty.clear();
     workspaceLists.clear(); tabRows.clear(); floating.clear(); paneBaseline.clear(); fileIcons.clear(); toolIcons.clear(); toolStates.clear(); agentStates.clear();
     pending = null; treeTarget = null; stopAll();
   };
