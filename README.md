@@ -14,7 +14,7 @@ Motion for Paseo's existing interface. Sidebars, panes, tabs and disclosures tra
 | Tabs | Animate opening, closing and reordering; transition selection colors. |
 | Explorer and timeline | Animate tree expansion/collapse, folder arrows, tool calls and thinking details. |
 | Overlays and controls | Short menu/dialog transitions, button press feedback and hover changes. |
-| Agent activity | Transition status changes and fade newly appended messages once near the conversation tail. |
+| Agent activity | Transition status changes, fade newly appended messages once near the conversation tail, and pace live assistant text through a short reveal queue. |
 | Scrolling | Damped edge rebound for agent conversations, workspace lists, Files, Changes, Markdown previews and editable/read-only file Source views. Normal scrolling and inertia stay with Paseo. |
 
 Workspace rows also move smoothly when pinned, unpinned or moved between status groups. Project creation/removal animates the group and surrounding list. These transitions use the sidebar motion setting.
@@ -33,7 +33,9 @@ File scrolling covers rendered Markdown and editable/read-only Source views for 
 
 The desktop fallback is an approximation: Paseo's Electron window does not currently enable `scrollBounce`, and a client plugin cannot change that main-process option. Exact macOS rebound requires host support.
 
-Streaming updates are coalesced by surface; wheel bursts rebase list snapshots after input settles. Text editing, selection and IME composition bypass global motion captures. Editor/terminal rendering does not trigger app layout scans. Motion and scans pause when the window loses focus or becomes hidden; returning rebases the current UI without replaying background changes. Tree commits reuse one bounded layout capture.
+Streaming updates are coalesced by surface. On web and native, a live assistant message is paced from its accumulated text, accelerating through bursts instead of jumping. On completion the plugin hands the stable source row back to Paseo's native renderer, restoring its Markdown, selection, copy, duration, and fork controls. Wheel bursts rebase list snapshots after input settles. Text editing, selection and IME composition bypass global motion captures. Editor/terminal rendering does not trigger app layout scans. Motion and scans pause when the window loses focus or becomes hidden; returning rebases the current UI without replaying background changes. Tree commits reuse one bounded layout capture.
+
+The plugin renderer is a temporary compatibility workaround until Paseo exposes its host Markdown renderer and streaming lifecycle to plugins upstream. Its live layout ports Paseo's chat Markdown type, default UI/mono font stacks, spacing, block splitting, syntax-token colours, and visual rules so the native completion handoff does not reflow ordinary content. On web it mirrors active syntax and prose metrics from already-rendered native Markdown; completed messages use Paseo's native renderer and footer controls. Paseo-specific Markdown extensions may still differ while a turn is streaming.
 
 ## Install
 

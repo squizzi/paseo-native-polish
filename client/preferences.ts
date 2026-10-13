@@ -1,4 +1,12 @@
 import { useSyncExternalStore } from "react";
+
+export const GENTLE_MOTION_DURATION_MS = 220;
+export const QUICK_MOTION_DURATION_MS = 150;
+export const GENTLE_STREAM_REVEAL_HORIZON_MS = 320;
+export const QUICK_STREAM_REVEAL_HORIZON_MS = QUICK_MOTION_DURATION_MS;
+export const GENTLE_STREAM_FADE_DURATION_MS = GENTLE_STREAM_REVEAL_HORIZON_MS;
+export const QUICK_STREAM_FADE_DURATION_MS = QUICK_MOTION_DURATION_MS;
+
 export interface Preferences {
   enabled: boolean; sidebars: boolean; trees: boolean; timeline: boolean; panes: boolean;
   tabs: boolean; overlays: boolean; controls: boolean; states: boolean; messages: boolean; elasticScroll: boolean; edgePeek: boolean;

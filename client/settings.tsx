@@ -1,7 +1,12 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsCard, SettingsSection, SettingsSwitch, SettingsSelect } from "@getpaseo/plugin/client/ui";
 import { Platform, Text, View } from "react-native";
-import { setPreferences, usePreferences } from "./preferences";
+import {
+  GENTLE_MOTION_DURATION_MS,
+  QUICK_MOTION_DURATION_MS,
+  setPreferences,
+  usePreferences,
+} from "./preferences";
 export function MotionSettings({ theme, layout }: PluginSurfaceProps) {
   const values = usePreferences();
   return (
@@ -23,9 +28,9 @@ export function MotionSettings({ theme, layout }: PluginSurfaceProps) {
           <SettingsSwitch label="Menus, popovers and dialogs" value={values.overlays} onValueChange={(overlays) => setPreferences({ ...values, overlays })} />
           <SettingsSwitch label="Buttons, hover and focus" value={values.controls} onValueChange={(controls) => setPreferences({ ...values, controls })} />
           <SettingsSwitch label="Loading and agent status changes" value={values.states} onValueChange={(states) => setPreferences({ ...values, states })} />
-          <SettingsSwitch label="New messages" value={values.messages} onValueChange={(messages) => setPreferences({ ...values, messages })} />
+          <SettingsSwitch label="New messages and native streaming motion" value={values.messages} onValueChange={(messages) => setPreferences({ ...values, messages })} />
           <SettingsSwitch label="Elastic scrolling" value={values.elasticScroll} onValueChange={(elasticScroll) => setPreferences({ ...values, elasticScroll })} />
-          <SettingsSelect label="Pace" value={values.pace} options={[{ label: "Gentle · 220 ms", value: "gentle" }, { label: "Quick · 150 ms", value: "quick" }]} onValueChange={(pace) => setPreferences({ ...values, pace: pace === "quick" ? "quick" : "gentle" })} />
+          <SettingsSelect label="Pace" value={values.pace} options={[{ label: `Gentle · ${GENTLE_MOTION_DURATION_MS} ms`, value: "gentle" }, { label: `Quick · ${QUICK_MOTION_DURATION_MS} ms`, value: "quick" }]} onValueChange={(pace) => setPreferences({ ...values, pace: pace === "quick" ? "quick" : "gentle" })} />
         </SettingsCard>
       </SettingsSection>
     </View>

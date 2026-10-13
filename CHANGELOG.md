@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Pace accumulated live assistant text on web and native clients, draining uneven provider bursts through a short per-frame reveal queue. On completion, return the stable row to Paseo's native renderer and full footer controls.
+- Expand the temporary plugin Markdown compatibility renderer from ux-polish's visible rules: tables, task lists, horizontal rules, grouped block quotes, standalone images, and `<details>` blocks now render locally until the host renderer is available to plugins upstream.
+- Port Paseo's chat Markdown layout tokens and top-level block spacing into the live compatibility renderer, preventing a reflow snap when the native renderer takes over at completion.
+- Add a plugin-safe port of Paseo's default syntax-token treatment and UI/mono font stacks to live code fences, so streamed code matches the native handoff.
+- Mirror the active native Markdown syntax palette and prose metrics into live web rows, avoiding a hard-coded theme approximation during streaming.
+- Match ux-polish's assistant row fade/rise/scale, bottom-following content rise, live-footer glide, and asynchronous tool-detail height transitions where the host exposes the required chat DOM seams.
+- Fade and rise newly arriving tool-call badges into the chat instead of letting them pop in, without replaying that entrance when a badge is merely scrolled back into view or a hidden workspace tab is switched back to.
+
 ## 0.4.13 · 2026-10-13
 
 - Stop doubling overlay animations. Popups that Paseo already fades, such as Usage, no longer get a second entrance or exit, and the Command Center no longer replays its entrance while typing. Reused portal surfaces are recognized when they open.

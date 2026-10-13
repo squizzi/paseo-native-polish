@@ -43,6 +43,13 @@ const SOURCE_SCROLL = `${FILE_PANE} [data-testid="file-source-editor"] .cm-scrol
 const SURFACES = '[data-testid="agent-chat-scroll"], [data-testid="sidebar-project-workspace-list-scroll"], [data-testid="sidebar-status-list-scroll"], [data-testid="file-explorer-tree-scroll"], [data-testid="changes-file-tree"], ' + SOURCE_SCROLL;
 const MARKDOWN_PREVIEW = '[data-testid="markdown-preview-frame"]';
 const MARKER = 'data-native-polish-elastic';
+// A chat actively streaming at the bottom keeps its own scrollTop pinned to
+// scrollHeight - clientHeight every tick (bottom-follow), which makes the
+// "already at the boundary" check below chronically true. Without this,
+// every ordinary downward wheel tick while streaming reads as an outward
+// overscroll and launches the rubber-band spring instead of just scrolling,
+// which is why reaching the bottom during a live stream took several tries.
+export const LIVE_BOTTOM_PIN = 'data-native-polish-live-bottom';
 const OFFSET = '--native-polish-elastic-offset';
 const COEFFICIENT = .55;
 // Wheel events have no platform phase information. Keep release latched for
@@ -209,7 +216,8 @@ export function installElasticScroll(options: { enabled(): boolean; quick(): boo
   }
   function pull(scroll: Element, delta: number, touching: boolean, gesture?: WheelGesture) {
     const max = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-    const outward = (delta < 0 && scroll.scrollTop <= 1) || (delta > 0 && scroll.scrollTop >= max - 1);
+    const outward = (delta < 0 && scroll.scrollTop <= 1)
+      || (delta > 0 && scroll.scrollTop >= max - 1 && scroll.getAttribute(LIVE_BOTTOM_PIN) === null);
     const current = springs.get(scroll);
     if (!outward) { if (current) finish(current); return; }
     const viewport = scroll.matches(SOURCE_SCROLL);

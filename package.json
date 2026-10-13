@@ -11,7 +11,8 @@
     "NOTICE"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:streaming-motion": "tsc client/streaming-motion.ts client/streaming-transform.ts --outDir .test-build --module commonjs --moduleResolution node --target ES2020 --skipLibCheck && node tests/streaming-motion.test.cjs"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.11.2",

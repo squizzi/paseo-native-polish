@@ -1,8 +1,26 @@
 import { Platform } from "react-native";
-import { defaults, getPreferences, setPreferences, subscribePreferences } from "./preferences";
-import { installElasticScroll } from "./elastic-scroll";
+import {
+  defaults,
+  GENTLE_STREAM_FADE_DURATION_MS,
+  getPreferences,
+  QUICK_MOTION_DURATION_MS,
+  QUICK_STREAM_FADE_DURATION_MS,
+  GENTLE_MOTION_DURATION_MS,
+  setPreferences,
+  subscribePreferences,
+} from "./preferences";
+import { installElasticScroll, LIVE_BOTTOM_PIN } from "./elastic-scroll";
 import { installEdgePeek } from "./edge-peek";
 import { leaseMotion } from "./motion-runtime";
+import {
+  isStreamingRehydrating,
+  isInitialTurnSettling,
+  shouldCrossfadeMarkdownHandoff,
+  shouldFlipStreamingRowHeight,
+  shouldSuppressTransientBottomFollow,
+  shouldSuppressRehydratedStreamEntrance,
+  STREAM_REHYDRATION_SETTLE_MS,
+} from "./streaming-motion";
 
 /* Desktop/Web adapter for Paseo 0.11.2. Host DOM is not a public plugin API.
  * Keep selectors here; native clients never touch these globals. No host events
@@ -22,6 +40,7 @@ interface Element {
   scrollTop: number; scrollLeft: number; scrollHeight: number; clientHeight: number;
   closest(selector: string): Element | null;
   matches(selector: string): boolean;
+  contains(other: Element | null): boolean;
   querySelector(selector: string): Element | null;
   querySelectorAll(selector: string): ArrayLike<Element>;
   addEventListener(type: string, callback: Listener): void;
@@ -53,7 +72,7 @@ declare const window: {
   innerWidth: number; innerHeight: number;
   getComputedStyle(element: Element): Style;
   matchMedia(query: string): Media;
-  requestAnimationFrame(callback: () => void): number;
+  requestAnimationFrame(callback: (timestamp: number) => void): number;
   cancelAnimationFrame(id: number): void;
   setTimeout(callback: () => void, ms: number): number;
   clearTimeout(id: number): void;
@@ -62,9 +81,11 @@ declare const window: {
   removeEventListener(type: string, callback: Listener, capture?: boolean): void;
 };
 interface Mutation { type: string; target: Element; attributeName: string | null; addedNodes: ArrayLike<Element>; removedNodes: ArrayLike<Element> }
-declare const MutationObserver: new (callback: (records: Mutation[]) => void) => { observe(target: Element, options: { subtree: boolean; childList: boolean; attributes: boolean; attributeFilter: string[] }): void; disconnect(): void };
+declare const MutationObserver: new (callback: (records: Mutation[]) => void) => { observe(target: Element, options: { subtree: boolean; childList: boolean; characterData: boolean; attributes: boolean; attributeFilter: string[] }): void; disconnect(): void };
+declare const ResizeObserver: new (callback: () => void) => { observe(target: Element): void; disconnect(): void };
 
 const TOOL = '[data-testid="tool-call-badge"], [data-testid="tool-call-group"]';
+const TOOL_DETAIL_CLIP = '[data-testid="tool-call-detail-entry-clip"]';
 const FILE_TREE = '[data-testid="file-explorer-tree-scroll"]';
 const FILE_ROW = '[data-testid^="file-explorer-row-"]:not([data-testid$="-name"])';
 const CHANGE_TREE = '[data-testid="changes-file-tree"]';
@@ -91,7 +112,15 @@ function hasAncestor(el: Element, ancestors: Iterable<Element>): boolean {
 }
 
 interface Snapshot { element: Element; box: Rect; copy: Element; parent: Element | null; next: Element | null }
-interface Disclosure { element: Element; height: number; children: Element[]; details: Snapshot[] }
+interface Disclosure {
+  element: Element;
+  height: number;
+  children: Element[];
+  details: Snapshot[];
+  expanded: boolean;
+  detail: Element | null;
+  detailHeight: number;
+}
 interface RowSnapshot extends Snapshot { key: string }
 interface Tree { element: Element; rows: RowSnapshot[] }
 interface PaneBox { element: Element; box: Rect }
@@ -103,6 +132,27 @@ const TAB_ROW = '[data-testid="workspace-tabs-scroll"]';
 const FLOATING = '[data-menu-surface="true"], [role="dialog"], [role="tooltip"]';
 const CHAT = '[data-testid="agent-chat-scroll"]';
 const HISTORY_ROW = '[data-history-row-id]';
+const CHAT_TIMELINE = '[data-testid="agent-chat-timeline"]';
+const CHAT_TIMELINE_CLIP = '[data-testid="agent-chat-timeline-clip"]';
+const WORKING_FOOTER = '[data-testid="turn-working-indicator"]';
+// The completed footer replaces the working indicator at the end of a turn.
+// Keep both out of a fallback timeline rise: older hosts put them beside the
+// rows rather than under the dedicated timeline node that ux-polish has.
+const COMPLETED_FOOTER = '[data-testid="turn-footer-entry-motion"]';
+const STREAM_MARKDOWN = '[data-testid^="native-polish-stream-pace-"]';
+const NATIVE_MARKDOWN_PARAGRAPH = '[data-paseo-markdown-tag="p"]';
+const NATIVE_MARKDOWN_ORDERED_LIST = '[data-paseo-markdown-tag="ol"]';
+const NATIVE_CODE_BLOCK = '[data-paseo-markdown-tag="pre"]';
+const NATIVE_CODE_SURFACE = '[data-pmono]';
+const LIVE_STREAM_PROSE = '[data-testid="native-polish-stream-prose"]';
+const LIVE_STREAM_HEADING = '[data-testid^="native-polish-stream-heading-"]';
+const LIVE_STREAM_CODE = '[data-testid="native-polish-stream-code"]';
+const LIVE_STREAM_CODE_SURFACE = '[data-testid="native-polish-stream-code-block"], [data-testid="native-polish-stream-code"], [data-testid="native-polish-stream-inline-code"]';
+const LIVE_STREAM_LIST = '[data-testid="native-polish-stream-list"]';
+const LIVE_STREAM_LIST_TEXT = '[data-testid="native-polish-stream-list-marker"], [data-testid="native-polish-stream-list-content"]';
+const LIVE_SYNTAX_TOKEN = '[data-testid^="native-polish-syntax-"]';
+const STREAM_ENTRANCE = '[data-testid="native-polish-stream-token"], [data-testid="native-polish-stream-block"], [data-testid="native-polish-stream-list"], [data-testid="native-polish-stream-prose"], [data-testid^="native-polish-stream-heading-"], [data-testid="native-polish-stream-code-block"]';
+const REHYDRATED_STREAM_ENTRANCE = 'data-native-polish-stream-rehydrated';
 const EDITING = 'input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[data-testid="file-source-editor"],.cm-editor,.monaco-editor,[data-testid="terminal-surface"],.xterm';
 // Some RN web Pressables omit a role. Keep the known interactive tree/sidebar
 // rows and pane actions eligible without capturing arbitrary content clicks.
@@ -206,7 +256,30 @@ function disclosureFor(target: Element): Element | null {
 function captureDisclosure(el: Element | null): Disclosure | null {
   if (!el || !visible(el)) return null;
   const children = Array.from(el.children);
-  return { element: el, height: rect(el).height, children, details: children.slice(1).filter(visible).map(snapshot) };
+  const detail = toolDetail(el);
+  return {
+    element: el,
+    height: rect(el).height,
+    children,
+    details: children.slice(1).filter(visible).map(snapshot),
+    expanded: toolExpanded(el),
+    detail,
+    detailHeight: detail ? rect(detail).height : 0,
+  };
+}
+function toolExpanded(tool: Element): boolean {
+  return tool.querySelector('[role="button"][aria-expanded="true"], [aria-expanded="true"]') !== null;
+}
+function toolDetail(tool: Element): Element | null {
+  return tool.querySelector(TOOL_DETAIL_CLIP) ?? Array.from(tool.children)[1] ?? null;
+}
+function toolDetailLines(tool: Element): Element[] {
+  const clips = all(tool, TOOL_DETAIL_CLIP).filter(visible);
+  if (clips.length) return clips;
+  const detail = toolDetail(tool);
+  if (!detail) return [];
+  const children = Array.from(detail.children).filter(visible);
+  return children.length ? children : visible(detail) ? [detail] : [];
 }
 function captureTree(target: Element): Tree | null {
   const tree = target.closest(FILE_TREE + ', ' + CHANGE_TREE);
@@ -269,18 +342,25 @@ function installWebMotion(): () => void {
   // Layout captures stay off while an edge preview is open; its scrolling is
   // still ordinary list input, so elastic rebound uses motionReady alone.
   const canAnimate = () => motionReady() && document.body.getAttribute('data-native-polish-peek') === null;
-  const duration = () => getPreferences().pace === 'quick' ? 150 : 220;
+  const duration = () => getPreferences().pace === 'quick' ? QUICK_MOTION_DURATION_MS : GENTLE_MOTION_DURATION_MS;
 
   const stopAll = () => {
     for (const stop of Array.from(active.values())) stop();
     for (const ghost of ghosts) ghost.remove();
     ghosts.clear();
   };
-  function animate(el: Element, frames: Record<string, string | number>[], cleanup?: () => void, delay = 0, milliseconds = duration()) {
+  function animate(
+    el: Element,
+    frames: Record<string, string | number>[],
+    cleanup?: () => void,
+    delay = 0,
+    milliseconds = duration(),
+    easing = EASING,
+  ) {
     active.get(el)?.();
     if (!canAnimate() || typeof el.animate !== 'function') { cleanup?.(); return; }
     let animation: Animation;
-    try { animation = el.animate(frames, { duration: milliseconds, easing: EASING, fill: 'both', delay }); }
+    try { animation = el.animate(frames, { duration: milliseconds, easing, fill: 'both', delay }); }
     catch { cleanup?.(); return; }
     let finished = false;
     const stop = () => {
@@ -293,13 +373,19 @@ function installWebMotion(): () => void {
     active.set(el, stop);
     void animation.finished.then(stop, stop);
   }
-  function temporaryStyles(el: Element, values: Record<string, string>): () => void {
-    const previous = Object.keys(values).map(key => [key, el.style.getPropertyValue(key), el.style.getPropertyPriority(key)]);
-    for (const [key, value] of Object.entries(values)) el.style.setProperty(key, value);
+  function temporaryStyles(el: Element, values: Record<string, string | { value: string; priority?: string }>): () => void {
+    const requested = Object.entries(values).map(([key, entry]) => ({
+      key,
+      value: typeof entry === 'string' ? entry : entry.value,
+      priority: typeof entry === 'string' ? '' : entry.priority ?? '',
+    }));
+    const previous = requested.map(({ key }) => [key, el.style.getPropertyValue(key), el.style.getPropertyPriority(key)]);
+    for (const { key, value, priority } of requested) el.style.setProperty(key, value, priority);
     return () => {
       for (const [key, value, priority] of previous) {
         // Restore only values still owned by us; React may have updated a style.
-        if (el.style.getPropertyValue(key) !== values[key]) continue;
+        const requestedStyle = requested.find(style => style.key === key)!;
+        if (el.style.getPropertyValue(key) !== requestedStyle.value || el.style.getPropertyPriority(key) !== requestedStyle.priority) continue;
         if (value) el.style.setProperty(key, value, priority);
         else el.style.removeProperty(key);
       }
@@ -388,15 +474,173 @@ function installWebMotion(): () => void {
     }
     return changed;
   }
+  // Match ux-polish's GrowingLabel: the summary sentence ("Ran 1 command" ->
+  // "Ran 2 commands, used 1 other tool") changes length as a tool group
+  // accumulates calls. The host just swaps the text, so the row pops to its
+  // new width; clip-animating its intrinsic text width eases the reveal
+  // without changing the flex-owned width of the surrounding row.
+  function intrinsicWidth(label: Element) {
+    // The host's label wrapper is flex:1, so its visible width is the
+    // available row width rather than the width of its text. Read its
+    // max-content width without letting that temporary layout reach a paint.
+    const restore = temporaryStyles(label, { flex: { value: 'none', priority: 'important' } });
+    const width = rect(label).width;
+    restore();
+    return width;
+  }
+  function animateGrowingLabel(label: Element, before: number, after: number) {
+    if (before <= 0 || after <= 0 || Math.abs(after - before) < 1 || active.has(label)) return;
+    // The host replaces the inner GrowingLabel frame as its text changes, but
+    // preserves the surrounding label row. Keep the row as the animation
+    // owner and reveal its already-committed text through an in-flow clip.
+    // Unlike a width tween on the replaceable child, this has a stable
+    // baseline across tool updates and cannot displace the footer.
+    const available = rect(label).width;
+    const clip = (width: number) => `inset(0 ${Math.max(0, available - width)}px 0 0)`;
+    const restore = temporaryStyles(label, {
+      overflow: { value: 'hidden', priority: 'important' },
+      'box-sizing': 'border-box',
+    });
+    animate(label, [{ clipPath: clip(before) }, { clipPath: clip(after) }], restore);
+  }
+  function animateShrinkingLabel(_before: Snapshot, label: Element, from: number, to: number) {
+    // GrowingLabel keeps the replacement text in its ordinary layout slot and
+    // changes only the local clip. A fixed-position copy can outlive the row
+    // that created it and overlay the footer during a concurrent stream tick.
+    // It also hides the live label long enough for numberOfLines={1} to flash
+    // an ellipsis. Use the same in-flow clip for either direction.
+    animateGrowingLabel(label, from, to);
+  }
+  function animateToolDetailResize(before: ToolLayout, next: ToolLayout) {
+    const detailFrame = next.detail;
+    const opening = !before.expanded && next.expanded;
+    const closing = before.expanded && !next.expanded;
+    if (detailFrame && Math.abs(next.detailHeight - before.detailHeight) >= 1 && !active.has(detailFrame)) {
+      // Match ux-polish's ExpandableBadgeCollapseClip: animate only its
+      // dedicated detail frame. Animating the whole badge lets the flex row
+      // compress the summary label, temporarily rendering it as `…`.
+      const restore = temporaryStyles(detailFrame, {
+        overflow: 'hidden',
+        'box-sizing': 'border-box',
+        'min-height': '0',
+        'flex-shrink': '0',
+      });
+      animate(
+        detailFrame,
+        [{ height: `${before.detailHeight}px` }, { height: `${next.detailHeight}px` }],
+        restore,
+        0,
+        closing ? Math.min(duration(), 120) : duration(),
+        closing ? 'cubic-bezier(0.4, 0, 1, 1)' : 'cubic-bezier(0.16, 1, 0.3, 1)',
+      );
+    }
+
+    const entering = opening ? next.details : next.details.filter(detail => !before.details.includes(detail));
+    let index = 0;
+    for (const detail of entering) {
+      const content = firstBoxChild(detail);
+      if (!content || active.has(content)) continue;
+      animate(
+        content,
+        [{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'translateY(0)' }],
+        undefined,
+        40 + Math.min(index++ * 18, 90),
+        duration(),
+      );
+    }
+  }
+  // A streaming row's content can pop to a very different size in one tick
+  // instead of growing a few px at a time: a tab-hidden row remounts showing
+  // everything it had already streamed (deliberately, so it does not replay
+  // the whole reveal from empty), or a provider's first delta is a full
+  // paragraph rather than a token. Either way it is not the gradual
+  // per-frame growth the rest of this file assumes, so clip-and-fade it the
+  // same way the renderer handoff below does instead of popping straight to
+  // the new height.
+  function flipStreamingRowHeight(row: Element, before: number, after: number) {
+    if (active.has(row)) return;
+    const restore = temporaryStyles(row, { overflow: 'hidden', 'box-sizing': 'border-box' });
+    animate(row, [
+      { height: `${before}px`, opacity: 1 },
+      { height: `${(before + after) / 2}px`, opacity: 0.3, offset: 0.3 },
+      { height: `${after}px`, opacity: 1 },
+    ], restore);
+  }
+  function crossfadeStreamingMarkdownHandoff(before: Snapshot) {
+    // A height animation cannot hide a line wrapping differently inside the
+    // row. Keep the final plugin pixels as an inert overlay and fade them out
+    // over the host's already-final native Markdown layout.
+    const copy = before.copy;
+    copy.setAttribute('data-native-polish-ghost', '');
+    copy.setAttribute('aria-hidden', 'true');
+    copy.setAttribute('inert', '');
+    copy.removeAttribute('data-history-row-id');
+    for (const entry of [copy, ...all(copy, STREAM_ENTRANCE)]) entry.setAttribute(REHYDRATED_STREAM_ENTRANCE, '');
+    for (const el of all(copy, '[id], [autofocus], [data-menu-surface], [data-message-id]')) {
+      el.removeAttribute('id'); el.removeAttribute('autofocus');
+      el.removeAttribute('data-menu-surface'); el.removeAttribute('data-message-id');
+    }
+    for (const el of all(copy, 'iframe, video, audio, input, textarea')) el.remove();
+    const style = window.getComputedStyle(before.element);
+    const box = before.box;
+    const values: Record<string, string> = {
+      position: 'fixed', left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px`,
+      margin: '0', overflow: 'hidden', 'box-sizing': 'border-box', 'pointer-events': 'none', 'z-index': '90',
+      color: style.getPropertyValue('color'), 'font-family': style.getPropertyValue('font-family'),
+    };
+    for (const [key, value] of Object.entries(values)) copy.style.setProperty(key, value, 'important');
+    document.body.appendChild(copy);
+    ghosts.add(copy);
+    animate(copy, [{ opacity: 1 }, { opacity: 0 }], () => { copy.remove(); ghosts.delete(copy); }, 0, getPreferences().pace === 'quick' ? 120 : 180);
+  }
+  function settleRehydratedStreamingRow(row: Element) {
+    // A row-height FLIP can outlive the tab that hid it. Cancelling it here
+    // releases its temporary height/opacity before the chat is shown again;
+    // otherwise the stale in-flight transform competes with the restored
+    // layout and reads as jitter on the first visible stream frame.
+    active.get(row)?.();
+    // CSS animations are created as part of the remount commit. Marking the
+    // already-present blocks in the mutation-observer turn prevents them from
+    // reaching a paint, while later streamed blocks remain unmarked and retain
+    // their normal entrance animation.
+    for (const entry of all(row, STREAM_ENTRANCE)) {
+      entry.setAttribute(REHYDRATED_STREAM_ENTRANCE, '');
+      for (const animation of entry.getAnimations?.() ?? []) animation.cancel();
+    }
+  }
   function animateDisclosure(before: Disclosure) {
     const el = before.element;
     if (!visible(el)) return;
     const children = Array.from(el.children);
-    // Streamed text, syntax highlighting and hover updates must not trigger a
-    // new expand animation. Only a change in the direct detail children does.
-    if (children.length === before.children.length && children.every((child, index) => child === before.children[index])) return;
     const height = rect(el).height;
     if (Math.abs(height - before.height) < 2) return;
+    if (el.matches(TOOL)) {
+      const nextDetail = toolDetail(el);
+      const next: ToolLayout = {
+        element: el,
+        height,
+        children,
+        expanded: toolExpanded(el),
+        detail: nextDetail,
+        detailHeight: nextDetail ? rect(nextDetail).height : 0,
+        details: toolDetailLines(el),
+      };
+      const previous: ToolLayout = {
+        element: el,
+        height: before.height,
+        children: before.children,
+        expanded: before.expanded,
+        detail: toolDetail(el),
+        details: toolDetailLines(el),
+        detailHeight: before.detailHeight,
+      };
+      const childChanged = children.length !== before.children.length || children.some((child, index) => child !== before.children[index]);
+      if (previous.expanded !== next.expanded || childChanged) animateToolDetailResize(previous, next);
+      return;
+    }
+    // Streamed text, syntax highlighting and hover updates must not trigger a
+    // new sidebar disclosure animation. Only direct detail children do.
+    if (children.length === before.children.length && children.every((child, index) => child === before.children[index])) return;
     active.get(el)?.();
     const restore = temporaryStyles(el, { overflow: 'hidden', 'box-sizing': 'border-box', 'min-height': '0' });
     animate(el, [{ height: `${before.height}px` }, { height: `${height}px` }], restore);
@@ -445,9 +689,162 @@ function installWebMotion(): () => void {
   let fileIcons = new Map<Element, string>();
   let toolIcons = new Map<Element, string>();
   let toolStates = new Map<Element, boolean>();
+  // Tracks every tool badge ever mounted, independent of its current viewport
+  // visibility. `live(TOOL)` drops off-screen badges, so diffing against the
+  // ambient layout maps alone would replay the entrance fade every time a
+  // scroll (or a hidden workspace tab) brings a long-settled badge back into
+  // view. A badge only counts as arriving once, the first time it mounts.
+  const seenTools = new WeakSet<Element>();
+  let toolsPrimed = false;
+  interface ToolLayout {
+    element: Element;
+    height: number;
+    children: Element[];
+    expanded: boolean;
+    detail: Element | null;
+    detailHeight: number;
+    details: Element[];
+  }
+  let toolLayouts = new Map<Element, ToolLayout>();
+  interface ToolLabelLayout { width: number; snapshot: Snapshot }
+  let toolLabelLayouts = new Map<Element, ToolLabelLayout>();
+  interface StreamingRowHeight { rowId: string; height: number; visible: boolean; snapshot: Snapshot }
+  let streamingRowHeights = new Map<Element, StreamingRowHeight>();
   let agentStates = new Map<Element, string>();
   const tabSettling = new WeakMap<Element, number>();
-  const chats = new WeakMap<Element, { seen: Set<string>; pending: Set<string>; running: boolean }>();
+  interface Rise {
+    start(node: Element, distance: number, counter?: Element | null): void;
+    cancel(): void;
+    offset(): number;
+  }
+  // This is the same exponential decay used by ux-polish's content-rise.
+  // It is deliberately separate from WAAPI: frequent stream commits retarget
+  // one continuous velocity instead of restarting a tween every token.
+  function createRise(): Rise {
+    let node: Element | null = null;
+    let baseTransform = '';
+    let basePriority = '';
+    let ownedTransform = '';
+    // A descendant that must not ride the node's transform -- the footer,
+    // when our timeline fallback (the rows' own container, since the real
+    // agent-chat-timeline testid is not shipped) happens to contain it as
+    // just another row. It gets the exact inverse offset every frame so it
+    // reads as a sibling the node's rise never touches, same as the real
+    // timeline/footer split this was ported from.
+    let counter: Element | null = null;
+    let counterBaseTransform = '';
+    let counterBasePriority = '';
+    let counterOwnedTransform = '';
+    let value = 0;
+    let frame = 0;
+    let previousTime: number | null = null;
+    const apply = (next: number) => {
+      value = next;
+      if (node) {
+        const transform = Math.abs(next) < .01 ? baseTransform : `${baseTransform}${baseTransform ? ' ' : ''}translateY(${next}px)`;
+        ownedTransform = transform;
+        if (transform) node.style.setProperty('transform', transform, basePriority);
+        else node.style.removeProperty('transform');
+      }
+      if (counter) {
+        const inverse = -next;
+        const transform = Math.abs(inverse) < .01 ? counterBaseTransform : `${counterBaseTransform}${counterBaseTransform ? ' ' : ''}translateY(${inverse}px)`;
+        counterOwnedTransform = transform;
+        if (transform) counter.style.setProperty('transform', transform, counterBasePriority);
+        else counter.style.removeProperty('transform');
+      }
+    };
+    const step = (timestamp: number) => {
+      const delta = previousTime === null ? 0 : timestamp - previousTime;
+      previousTime = timestamp;
+      const next = value * Math.exp(-delta / 110);
+      // The host row's final layout is already in place. Snapping from a
+      // half-pixel residual back to it is visible on a high-DPI chat pane,
+      // particularly when the plugin's Markdown block fade ends nearby.
+      // Let the exponential tail reach an effectively subpixel value first.
+      if (Math.abs(next) < .1) {
+        frame = 0;
+        previousTime = null;
+        apply(0);
+        return;
+      }
+      apply(next);
+      frame = window.requestAnimationFrame(step);
+    };
+    const releaseCounter = () => {
+      if (counter && counter.style.getPropertyValue('transform') === counterOwnedTransform) {
+        if (counterBaseTransform) counter.style.setProperty('transform', counterBaseTransform, counterBasePriority);
+        else counter.style.removeProperty('transform');
+      }
+      counter = null;
+      counterBaseTransform = '';
+      counterBasePriority = '';
+      counterOwnedTransform = '';
+    };
+    return {
+      start(nextNode, distance, nextCounter = null) {
+        if (!canAnimate() || Math.abs(distance) <= .5) return;
+        if (node !== nextNode) {
+          this.cancel();
+          node = nextNode;
+          baseTransform = node.style.getPropertyValue('transform');
+          basePriority = node.style.getPropertyPriority('transform');
+          ownedTransform = baseTransform;
+        }
+        if (counter !== nextCounter) {
+          releaseCounter();
+          counter = nextCounter;
+          if (counter) {
+            counterBaseTransform = counter.style.getPropertyValue('transform');
+            counterBasePriority = counter.style.getPropertyPriority('transform');
+            counterOwnedTransform = counterBaseTransform;
+          }
+        }
+        apply(value + distance);
+        if (!frame) frame = window.requestAnimationFrame(step);
+      },
+      cancel() {
+        if (frame) window.cancelAnimationFrame(frame);
+        frame = 0;
+        previousTime = null;
+        if (node && node.style.getPropertyValue('transform') === ownedTransform) {
+          if (baseTransform) node.style.setProperty('transform', baseTransform, basePriority);
+          else node.style.removeProperty('transform');
+        }
+        releaseCounter();
+        node = null;
+        baseTransform = '';
+        basePriority = '';
+        ownedTransform = '';
+        value = 0;
+      },
+      offset: () => value,
+    };
+  }
+  interface ChatLayout {
+    seen: Set<string>;
+    pending: Set<string>;
+    running: boolean;
+    streamingRenderer: boolean;
+    scrollTop: number;
+    bottom: number;
+    visible: boolean;
+    rehydratingUntil: number;
+    turnStartUntil: number;
+    contentRise: Rise;
+    resizeObserver: { observe(target: Element): void; disconnect(): void };
+    observedTimeline: Element | null;
+    observedFooter: Element | null;
+  }
+  const chats = new Map<Element, ChatLayout>();
+  const clearChatMotion = () => {
+    for (const [chat, state] of chats) {
+      state.contentRise.cancel();
+      state.resizeObserver.disconnect();
+      chat.removeAttribute(LIVE_BOTTOM_PIN);
+    }
+    chats.clear();
+  };
   const decorations = new Map<Element, () => void>();
   type Region = 'controls' | 'workspaces' | 'tabs' | 'floating' | 'panes' | 'agents' | 'files' | 'tools' | 'messages' | 'elastic';
   const regions: Region[] = ['controls', 'workspaces', 'tabs', 'floating', 'panes', 'agents', 'files', 'tools', 'messages', 'elastic'];
@@ -481,6 +878,80 @@ function installWebMotion(): () => void {
     }
     body[data-native-polish-states="true"] :is(${TAB},[data-testid^="sidebar-workspace-"]) :is(svg,path,circle) {
       transition: color 150ms,stroke 150ms,fill 150ms;
+    }
+    @keyframes native-polish-stream-token {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    @keyframes native-polish-stream-block {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    [data-testid="native-polish-stream-token"] {
+      display: inline;
+      white-space: pre-wrap;
+      overflow: visible;
+      line-height: inherit !important;
+      animation: native-polish-stream-token ${GENTLE_STREAM_FADE_DURATION_MS}ms ease-out backwards;
+    }
+    /* RN-web gives every nested Text its own default size. The streaming
+       renderer intentionally nests fade and Markdown spans, so make ordinary
+       descendants take their measured paragraph/heading metric exactly. */
+    :is([data-testid="native-polish-stream-prose"],[data-testid^="native-polish-stream-heading-"],[data-testid="native-polish-stream-list-marker"],[data-testid="native-polish-stream-list-content"]) :not([data-testid="native-polish-stream-inline-code"]) {
+      font-family: inherit !important;
+      font-size: inherit !important;
+      line-height: inherit !important;
+    }
+    [data-testid="native-polish-stream-code"] * {
+      font-family: inherit !important;
+      font-size: inherit !important;
+      line-height: inherit !important;
+    }
+    :is([data-testid^="native-polish-stream-pace-"],[data-testid="native-polish-markdown"]) :is(*,::before,::after) {
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    [data-testid="native-polish-assistant-copy"] {
+      cursor: pointer;
+    }
+    [data-testid="native-polish-assistant-copy"]:hover {
+      background: color-mix(in srgb, currentColor 10%, transparent);
+    }
+    [data-testid^="native-polish-stream-pace-"] :is([data-testid="native-polish-stream-block"],[data-testid="native-polish-stream-list"],[data-testid="native-polish-stream-prose"],[data-testid^="native-polish-stream-heading-"],[data-testid="native-polish-stream-code-block"]) {
+      animation: native-polish-stream-block 200ms cubic-bezier(0.16,1,0.3,1) backwards;
+    }
+    /* Fading individual monospace tokens makes every short code chunk blink,
+       and a partial fence can otherwise replay the block entrance when the
+       parser promotes it from prose to a fenced block. Code still arrives via
+       the paced reveal queue, just without opacity animation. */
+    [data-testid="native-polish-stream-code-block"],
+    [data-testid="native-polish-stream-code"] [data-testid="native-polish-stream-token"] {
+      animation: none !important;
+      opacity: 1 !important;
+    }
+    [${REHYDRATED_STREAM_ENTRANCE}] {
+      animation: none !important;
+    }
+    [data-testid="agent-chat-timeline-clip"] {
+      /* Preserve the host's display mode. In this shipped DOM the clip is a
+         flex-growing child; forcing it to display:flex makes it consume the
+         remaining chat height and strands the completed footer below it. */
+      overflow: hidden;
+    }
+    [data-testid="agent-chat-timeline"] {
+      will-change: transform;
+    }
+    [data-testid="native-polish-stream-pace-quick"] [data-testid="native-polish-stream-token"] {
+      animation-duration: ${QUICK_STREAM_FADE_DURATION_MS}ms;
+    }
+    [data-testid="native-polish-stream-pace-quick"] :is([data-testid="native-polish-stream-block"],[data-testid="native-polish-stream-list"],[data-testid="native-polish-stream-prose"],[data-testid^="native-polish-stream-heading-"],[data-testid="native-polish-stream-code-block"]) {
+      animation-duration: 150ms;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      [data-testid="native-polish-stream-token"], [data-testid="native-polish-stream-block"], [data-testid="native-polish-stream-list"], [data-testid="native-polish-stream-prose"], [data-testid^="native-polish-stream-heading-"], [data-testid="native-polish-stream-code-block"] {
+        animation: none !important;
+        opacity: 1 !important;
+      }
     }
   `;
   document.head.appendChild(stylesheet);
@@ -764,49 +1235,445 @@ function installWebMotion(): () => void {
   }
   function updateToolStates(allow: boolean) {
     const nextTools = new Map<Element, boolean>();
+    const nextLayouts = new Map<Element, ToolLayout>();
+    const nextLabelLayouts = new Map<Element, ToolLabelLayout>();
     const slots: Element[] = [];
+    // A badge is only a true arrival the first time it is observed anywhere
+    // in the document, scanned without the viewport filter `live` applies so
+    // a badge rendered below the fold does not look new once scrolled into
+    // view. The very first pass primes this set without animating, so an
+    // already-open chat's history does not flood in on load.
+    const primed = toolsPrimed;
+    toolsPrimed = true;
+    const arriving = new Set<Element>();
+    for (const tool of all(document.body, TOOL)) {
+      if (tool.closest('[data-native-polish-ghost]')) continue;
+      if (!seenTools.has(tool)) { seenTools.add(tool); arriving.add(tool); }
+    }
     for (const tool of live(TOOL).slice(0, 80)) {
       const header = firstBoxChild(tool);
       if (!header) continue;
+      if (allow && getPreferences().timeline && primed && arriving.has(tool) && !active.has(tool)) {
+        animate(tool, [
+          { opacity: 0, transform: 'translateY(6px) scale(.98)' },
+          { opacity: 1, transform: 'translateY(0) scale(1)' },
+        ]);
+      }
       const running = Boolean(header.querySelector('[style*="--paseo-shimmer"]'));
       nextTools.set(header, running);
+      const children = Array.from(tool.children).filter(visible);
+      const layout: ToolLayout = {
+        element: tool,
+        height: rect(tool).height,
+        children,
+        expanded: toolExpanded(tool),
+        detail: toolDetail(tool),
+        detailHeight: toolDetail(tool) ? rect(toolDetail(tool)!).height : 0,
+        details: toolDetailLines(tool),
+      };
+      const previousLayout = toolLayouts.get(tool);
+      // Match the host clip only when the disclosure state changes or a
+      // detail pane is added. Reflow from streamed tool output must remain
+      // auto-height; chasing every token means an expansion never settles.
+      const childChanged = previousLayout && (
+        previousLayout.children.length !== layout.children.length ||
+        layout.children.some((child, index) => child !== previousLayout.children[index])
+      );
+      const detailChanged = previousLayout && (
+        previousLayout.details.length !== layout.details.length ||
+        layout.details.some((detail, index) => detail !== previousLayout.details[index])
+      );
+      if (
+        allow && getPreferences().timeline && previousLayout &&
+        !pending?.disclosure?.element.matches(TOOL) &&
+        (previousLayout.expanded !== layout.expanded || childChanged || detailChanged)
+      ) animateToolDetailResize(previousLayout, layout);
+      nextLayouts.set(tool, layout);
       if (allow && getPreferences().states && toolStates.has(header) && toolStates.get(header) !== running && !active.has(header)) animate(header, [{ opacity: .65 }, { opacity: 1 }], undefined, 0, 150);
       const row = firstBoxChild(header);
       const slot = row ? firstBoxChild(row) : null;
       if (slot && !Array.from(slot.querySelectorAll('svg')).some(chevron)) slots.push(slot);
+      // The icon badge is the row's first box child; the summary sentence
+      // (plus any secondary label and open-file button) is the row directly
+      // after it. There is no testid for it in the shipped host markup.
+      const labelRow = row ? Array.from(row.children).filter(visible)[1] ?? null : null;
+      // The stable label row owns the clipped GrowingLabel child. The child
+      // itself is recreated by host updates, so using it as a Map key drops
+      // the previous width and makes every transition look like an initial
+      // mount.
+      const growingLabel = labelRow;
+      if (growingLabel) {
+        const previous = toolLabelLayouts.get(growingLabel);
+        // During an in-flight clip reveal, its current painted width is
+        // not a future baseline. Preserve the last intrinsic measurement.
+        const width = active.has(growingLabel) && previous ? previous.width : intrinsicWidth(growingLabel);
+        if (allow && getPreferences().timeline && previous && !active.has(growingLabel)) {
+          if (width < previous.width) animateShrinkingLabel(previous.snapshot, growingLabel, previous.width, width);
+          else animateGrowingLabel(growingLabel, previous.width, width);
+        }
+        nextLabelLayouts.set(growingLabel, { width, snapshot: snapshot(growingLabel) });
+      }
     }
     toolIcons = updateIcons(slots, toolIcons, allow);
     toolStates = nextTools;
+    toolLayouts = nextLayouts;
+    toolLabelLayouts = nextLabelLayouts;
+  }
+  function liveFooter(chat: Element, timeline: Element | null): Element | null {
+    if (timeline) {
+      const clip = timeline.parentElement?.matches(CHAT_TIMELINE_CLIP) ? timeline.parentElement : timeline;
+      // In the web stream strategy the live auxiliary/footer is the sibling
+      // immediately after the clipped timeline. Do not walk arbitrary DOM;
+      // the fallback remains scoped to the known working footer.
+      const sibling = clip.nextElementSibling;
+      if (sibling) return sibling;
+    }
+    const completed = chat.querySelector(COMPLETED_FOOTER);
+    if (completed) return completed;
+    const indicator = chat.querySelector(WORKING_FOOTER);
+    return indicator?.parentElement ?? indicator;
+  }
+  function syncLiveMarkdownPresentation(chat: Element) {
+    // The host's root font rule deliberately excludes [data-pmono] surfaces.
+    // The public plugin React Native types cannot emit that host-only dataset,
+    // so mark the streamed DOM before paint to keep code metrics stable until
+    // the native Markdown renderer resumes at completion.
+    for (const surface of all(chat, LIVE_STREAM_CODE_SURFACE)) surface.setAttribute('data-pmono', '');
+    // Host typography and syntax preferences are intentionally not in the
+    // plugin theme contract. Read only the already-rendered native Markdown
+    // beside this plugin row, then mirror its computed presentation locally.
+    // This keeps a plugin workaround visually faithful without reaching into
+    // React state or sending any message content anywhere.
+    const nativeParagraph = all(chat, NATIVE_MARKDOWN_PARAGRAPH)
+      .find((node) => !node.closest(STREAM_MARKDOWN));
+    if (nativeParagraph) {
+      const nativeText = all(nativeParagraph, '*').find(
+        (node) => node.children.length === 0 && Boolean((node.textContent ?? '').trim()),
+      ) ?? nativeParagraph;
+      const computed = window.getComputedStyle(nativeText);
+      const fontFamily = computed.getPropertyValue('font-family');
+      const fontSize = computed.getPropertyValue('font-size');
+      const lineHeight = computed.getPropertyValue('line-height');
+      for (const prose of all(chat, LIVE_STREAM_PROSE)) {
+        if (fontFamily) prose.style.setProperty('font-family', fontFamily);
+        if (fontSize) prose.style.setProperty('font-size', fontSize);
+        if (lineHeight) prose.style.setProperty('line-height', lineHeight);
+      }
+      // List labels and content are separate RN Text trees, so they cannot
+      // inherit the measured prose values through the View list container.
+      for (const listText of all(chat, LIVE_STREAM_LIST_TEXT)) {
+        if (fontFamily) listText.style.setProperty('font-family', fontFamily);
+        if (fontSize) listText.style.setProperty('font-size', fontSize);
+        if (lineHeight) listText.style.setProperty('line-height', lineHeight);
+      }
+      const nativeOrderedList = all(chat, NATIVE_MARKDOWN_ORDERED_LIST)
+        .find((node) => !node.closest(STREAM_MARKDOWN));
+      if (nativeOrderedList) {
+        const nativeMarker = all(nativeOrderedList, '*').find((node) =>
+          node.children.length === 0 && /^\d+[.)]$/.test((node.textContent ?? '').trim()),
+        ) ?? nativeOrderedList;
+        const inset = rect(nativeMarker).left - rect(nativeText).left;
+        if (Number.isFinite(inset) && inset > .5) {
+          for (const list of all(chat, LIVE_STREAM_LIST)) {
+            list.style.setProperty('margin-left', `${inset}px`);
+          }
+        }
+      }
+      const contentSize = Number.parseFloat(fontSize);
+      if (Number.isFinite(contentSize) && contentSize > 0) {
+        const tiers = [26, 22, 20, 18, 16, 16];
+        for (const heading of all(chat, LIVE_STREAM_HEADING)) {
+          const level = Number.parseInt(heading.getAttribute('data-testid')?.split('-').at(-1) ?? '', 10);
+          const tier = tiers[level - 1];
+          if (!tier) continue;
+          const size = Math.round(contentSize * tier / 14);
+          heading.style.setProperty('font-size', `${size}px`);
+          heading.style.setProperty('line-height', `${Math.round(size * 1.3)}px`);
+          if (fontFamily) heading.style.setProperty('font-family', fontFamily);
+        }
+      }
+    }
+    const nativeCode = all(chat, NATIVE_CODE_BLOCK)
+      .find((node) => !node.closest(STREAM_MARKDOWN));
+    if (nativeCode) {
+      const nativeText = all(nativeCode, '*').find(
+        (node) => node.children.length === 0 && Boolean((node.textContent ?? '').trim()),
+      ) ?? nativeCode;
+      const computed = window.getComputedStyle(nativeText);
+      const fontFamily = computed.getPropertyValue('font-family');
+      const fontSize = computed.getPropertyValue('font-size');
+      const lineHeight = computed.getPropertyValue('line-height');
+      for (const code of all(chat, LIVE_STREAM_CODE)) {
+        if (fontFamily) code.style.setProperty('font-family', fontFamily);
+        if (fontSize) code.style.setProperty('font-size', fontSize);
+        if (lineHeight) code.style.setProperty('line-height', lineHeight);
+      }
+    }
+    const roleMatchers: Array<[string, RegExp]> = [
+      ['keyword', /^(?:as|async|await|break|case|catch|class|const|continue|def|default|do|else|export|extends|finally|for|from|function|if|import|in|interface|let|new|return|switch|throw|try|type|var|while|with|yield)$/],
+      ['comment', /^(?:\/\/|#)/],
+      ['string', /^(?:["'`]|Lorem ipsum)/],
+      ['number', /^\d/],
+      ['definition', /^(?:formatLorem|lorem|message|renderMessage)$/],
+      ['function', /^(?:formatMessage|log)$/],
+      ['class', /^[A-Z][A-Za-z0-9_]*$/],
+      ['type', /^(?:any|boolean|float|int|never|null|number|object|string|undefined|unknown|void)$/],
+      ['property', /^(?:log|retries|text|length|map|filter|join|split)$/],
+      ['variable', /^(?:console|value|messages|state|chunk)$/],
+      ['operator', /^(?:=>|=|\.)$/],
+      ['punctuation', /^[{}()[\],.;:]$/],
+    ];
+    const palette = new Map<string, string>();
+    for (const surface of all(chat, NATIVE_CODE_SURFACE)) {
+      if (surface.closest(STREAM_MARKDOWN)) continue;
+      for (const node of all(surface, '*')) {
+        const text = (node.textContent ?? '').trim();
+        const role = roleMatchers.find(([, matcher]) => matcher.test(text))?.[0];
+        if (!role) continue;
+        const color = window.getComputedStyle(node).getPropertyValue('color');
+        if (color) palette.set(role, color);
+      }
+    }
+    for (const token of all(chat, LIVE_SYNTAX_TOKEN)) {
+      const role = token.getAttribute('data-testid')?.replace('native-polish-syntax-', '');
+      const color = role ? palette.get(role) : undefined;
+      if (color) token.style.setProperty('color', color);
+    }
   }
   function updateMessages(allow: boolean) {
-    for (const chat of live(CHAT)) {
+    for (const [chat, state] of chats) {
+      if (chat.isConnected) continue;
+      state.contentRise.cancel();
+      chats.delete(chat);
+      streamingRowHeights.delete(chat);
+    }
+    // Keep a baseline for mounted chats even while their workspace tab is
+    // hidden. `live(CHAT)` intentionally excludes zero-sized nodes, but that
+    // left `visible: true` stale during tab switches and made the first frame
+    // on return look like new stream growth, replaying the bottom-follow rise.
+    for (const chat of all(document.body, CHAT).filter((node) =>
+      node.isConnected && !node.closest('[data-native-polish-ghost]'),
+    )) {
+      syncLiveMarkdownPresentation(chat);
       const rows = all(chat, HISTORY_ROW);
       const old = chats.get(chat);
-      const running = Boolean(chat.querySelector('[data-testid="turn-working-indicator"]'));
+      const running = Boolean(chat.querySelector(WORKING_FOOTER));
+      const streamingRenderer = Boolean(chat.querySelector(STREAM_MARKDOWN));
+      // A hidden/backgrounded tab (another workspace tab switched in front of
+      // it) keeps this chat mounted and connected, so observers can go quiet
+      // on it without the state below ever reflecting what actually happened
+      // while it was offscreen. On the first tick after it reappears, treat
+      // every one-shot "state just changed" comparison as a resync instead of
+      // a real transition: old.running can still read false there even
+      // though the turn had already started while this tab was hidden,
+      // which replayed the footer's "just started" pulse on every rehydrate.
+      const now = Date.now();
+      const chatVisible = visible(chat);
+      const justAppeared = chatVisible && old !== undefined && !old.visible;
+      const rehydratingUntil = justAppeared ? now + STREAM_REHYDRATION_SETTLE_MS : old?.rehydratingUntil ?? 0;
+      const rehydrating = isStreamingRehydrating(justAppeared, rehydratingUntil, now);
+      const turnJustStarted = Boolean(old && !old.running && running);
+      // The working-footer entrance starts after the new-message animation.
+      // Do not let its delayed transform hand off to a timeline rise: use the
+      // finished layout as the next baseline instead. Quick is 200ms delay +
+      // 150ms duration; gentle is 320ms + 220ms, with one frame of slack.
+      const turnStartSettleMs = getPreferences().pace === 'quick' ? 400 : 580;
+      const turnStartUntil = turnJustStarted ? now + turnStartSettleMs : old?.turnStartUntil ?? 0;
+      const turnStarting = isInitialTurnSettling(turnJustStarted, turnStartUntil, now);
+      // A live plugin row is replaced by the native assistant row at turn
+      // completion. It is the same message, not an arriving message: leave
+      // it at full opacity so the native footer can appear without replaying
+      // the entry fade over the completed text.
+      const rendererHandoff = Boolean(old && old.streamingRenderer && !streamingRenderer);
+      // Native Markdown has its final height before this observer runs. Treat
+      // its replacement as a baseline, not fresh streamed growth; otherwise
+      // bottom-follow scrolls it, then corrects itself after the crossfade.
+      const suppressBottomFollow = shouldSuppressTransientBottomFollow(rehydrating, turnStarting, rendererHandoff);
+      // Our markdown and the host's are close, not identical: line-height,
+      // block spacing and wrapping differ by a few px. That real difference
+      // lands as a pop the instant the host row replaces ours, indistinguishable
+      // from any other row resize -- so smooth it the same way: capture the
+      // live row's height every tick while it is ours to render, then FLIP
+      // the specific row from that captured height to its post-handoff height
+      // the moment the swap lands, instead of leaving it to the generic
+      // chat-level bottom-follow to absorb as one more undifferentiated jump.
+      const streamingRow = streamingRenderer ? rows.find(row => row.querySelector(STREAM_MARKDOWN)) : undefined;
+      // Every behavior below is part of the same "smooth streaming" feature,
+      // so each piece checks the same preferences.messages toggle the rest
+      // of this file already gates message motion on -- disabling it should
+      // mean no streaming-row entrance suppression, no FLIP, no crossfade,
+      // not just no pacing animation inside the renderer itself.
+      const smoothStreamingEnabled = allow && getPreferences().messages;
+      if (streamingRow && smoothStreamingEnabled && shouldSuppressRehydratedStreamEntrance(rehydrating, true)) {
+        settleRehydratedStreamingRow(streamingRow);
+      }
+      if (streamingRow) {
+        const rowId = streamingRow.getAttribute('data-history-row-id')!;
+        const height = rect(streamingRow).height;
+        const rowVisible = visible(streamingRow);
+        const previous = streamingRowHeights.get(chat);
+        // A normal paced-reveal frame moves a few px at most. A jump bigger
+        // than a line or two means this tick was not gradual growth -- a
+        // rehydrated row showing its whole backlog at once, or an oversized
+        // first delta -- so it gets the same FLIP treatment as the handoff
+        // below rather than popping straight to the new height.
+        if (smoothStreamingEnabled && previous && shouldFlipStreamingRowHeight({
+          previousHeight: previous.height,
+          nextHeight: height,
+          sameRow: previous.rowId === rowId,
+          previouslyVisible: previous.visible,
+          visible: rowVisible,
+          rehydrating,
+        })) {
+          flipStreamingRowHeight(streamingRow, previous.height, height);
+        }
+        streamingRowHeights.set(chat, { rowId, height, visible: rowVisible, snapshot: snapshot(streamingRow) });
+      } else if (rendererHandoff) {
+        const before = streamingRowHeights.get(chat);
+        const handoffRow = before ? rows.find(row => row.getAttribute('data-history-row-id') === before.rowId) : undefined;
+        if (smoothStreamingEnabled && before && handoffRow && shouldCrossfadeMarkdownHandoff(true, visible(handoffRow))) {
+          crossfadeStreamingMarkdownHandoff(before.snapshot);
+        }
+        streamingRowHeights.delete(chat);
+      }
       const seen = old?.seen ?? new Set<string>();
       const candidates = allow ? old?.pending ?? new Set<string>() : new Set<string>();
+      if (rendererHandoff) candidates.clear();
       let lastKnown = -1;
       rows.forEach((row, index) => { if (seen.has(row.getAttribute('data-history-row-id')!)) lastKnown = index; });
-      const atBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 180;
+      // Match the host's follow-output threshold. A reader who has moved away
+      // from this band owns their scroll position; inside it, the stream owns
+      // a strict bottom anchor.
+      const atBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight <= 64;
+      // Elastic scroll treats "already at scrollHeight - clientHeight" as an
+      // overscroll boundary. While a turn is running and the reader is at the
+      // bottom, that boundary is a moving target our own bottom-follow keeps
+      // snapping to, not a real edge: tag it so a normal downward scroll isn't
+      // mistaken for an outward pull and bounced instead of just scrolling.
+      if (running && atBottom) chat.setAttribute(LIVE_BOTTOM_PIN, '');
+      else chat.removeAttribute(LIVE_BOTTOM_PIN);
       let entered = 0;
       rows.forEach((row, index) => {
         const id = row.getAttribute('data-history-row-id')!;
         const isNew = !seen.has(id);
         seen.add(id);
-        if (allow && old && isNew && lastKnown >= 0 && index > lastKnown && atBottom && Date.now() >= quietUntil) candidates.add(id);
-        if (candidates.has(id) && visible(row) && row.querySelector('[data-testid="user-message"], [data-testid="assistant-message"]')) {
+        if (allow && old && !rendererHandoff && isNew && lastKnown >= 0 && index > lastKnown && atBottom && Date.now() >= quietUntil) candidates.add(id);
+        if (candidates.has(id) && visible(row) && row.querySelector('[data-testid="user-message"], [data-testid="assistant-message"], ' + STREAM_MARKDOWN)) {
           candidates.delete(id);
-          if (allow && getPreferences().messages && atBottom && Date.now() >= quietUntil && entered++ < 4) animate(row, [{ opacity: 0 }, { opacity: 1 }], undefined, 0, 150);
+          if (!rendererHandoff && allow && getPreferences().messages && atBottom && Date.now() >= quietUntil && entered++ < 4) {
+            animate(row, [
+              { opacity: 0, transform: 'translateY(6px) scale(.98)' },
+              { opacity: 1, transform: 'translateY(0) scale(1)' },
+            ], undefined, 0, getPreferences().pace === 'quick' ? 200 : 320);
+          }
         }
       });
-      if (allow && getPreferences().states && old && old.running !== running && atBottom) {
-        const indicator = chat.querySelector('[data-testid="turn-working-indicator"]') ?? rows[rows.length - 1];
-        if (indicator && visible(indicator) && !active.has(indicator)) animate(indicator, [{ opacity: .4 }, { opacity: 1 }], undefined, 0, 150);
-      }
       while (seen.size > 5000) seen.delete(seen.values().next().value!);
       const currentIds = new Set(rows.map(row => row.getAttribute('data-history-row-id')!));
       for (const id of candidates) if (!atBottom || !currentIds.has(id)) candidates.delete(id);
-      chats.set(chat, { seen, pending: candidates, running });
+      // The host has not yet shipped the agent-chat-timeline testid this was
+      // ported against (it only exists on an unreleased branch). Fall back to
+      // the rows' own container so the rise still has a real node to offset
+      // instead of silently no-op'ing into an unsmoothed snap. liveFooter still
+      // takes the strict testid match only: a guessed container's sibling is
+      // not reliably the working footer, and the function already falls back
+      // to scanning for WORKING_FOOTER when it gets null.
+      const testidTimeline = chat.querySelector(CHAT_TIMELINE);
+      const timeline = testidTimeline ?? rows[0]?.parentElement ?? null;
+      const footer = liveFooter(chat, testidTimeline);
+      // The footer used to pop in the instant the turn started, which lands
+      // in the same frame or two as the new row's own chat-entry fade --
+      // reading as one abrupt, uncoordinated motion ("slides down quickly").
+      // Hold it until that fade's duration has elapsed, then ease it in
+      // gently on its own, afterward, instead of racing it.
+      if (allow && getPreferences().states && old && !old.running && running && atBottom && !rehydrating && footer && visible(footer) && !active.has(footer)) {
+        const entryDelay = getPreferences().pace === 'quick' ? 200 : 320;
+        animate(footer, [
+          { opacity: 0, transform: 'translateY(-10px)' },
+          { opacity: 1, transform: 'translateY(0)' },
+        ], undefined, entryDelay);
+      }
+      const contentRise = old?.contentRise ?? createRise();
+      // A rise already in flight when the tab is backgrounded keeps decaying:
+      // requestAnimationFrame has no idea this chat went offscreen, since
+      // that is a Paseo-internal tab switch, not the browser tab/window
+      // itself. Skipping the next start() call was not enough -- whatever
+      // offset (and counter-compensated footer) it had decayed to by the
+      // time this one reappeared was still sitting there, then got released
+      // or re-targeted the moment real growth resumed. Cancel outright on
+      // rehydration so it resumes from a clean, fully-settled state instead.
+      if (suppressBottomFollow) contentRise.cancel();
+      // MutationObserver tells us a stream commit happened, but its callback
+      // can precede the browser's final scrollHeight/scrollTop reconciliation.
+      // Observe the committed geometry as well: this is the same pre-paint
+      // boundary the host uses to detect bottom-follow movement. Without it,
+      // the timeline only sees provider-sized scroll jumps instead of every
+      // paced text-layout increment.
+      const resizeObserver = old?.resizeObserver ?? new ResizeObserver(() => {
+        if (!disposed && !suspended) refreshChatBeforePaint();
+      });
+      if (!old || old.observedTimeline !== timeline || old.observedFooter !== footer) {
+        resizeObserver.disconnect();
+        resizeObserver.observe(chat);
+        if (timeline) resizeObserver.observe(timeline);
+        if (footer) resizeObserver.observe(footer);
+      }
+      const bottom = Math.max(0, chat.scrollHeight - chat.clientHeight);
+      // Pin and rise on any change to the content's own bottom, not just
+      // growth: a sidebar opening/closing changes the chat's width, which
+      // reflows wrapped lines and can shrink scrollHeight too (fewer wrapped
+      // lines at the wider measure). The browser clamps scrollTop to the new,
+      // smaller max on its own the instant that happens, before any of our
+      // code runs; pinning and gliding both directions the same way is the
+      // only way to mask that clamp instead of just the growth case.
+      //
+      // Comparing against old.bottom rather than old.scrollTop matters for
+      // growth specifically: old.scrollTop treated "the reader is still
+      // mid-scroll toward the bottom" the same as "new content just arrived",
+      // so the instant a manual scroll crossed into the atBottom slack it got
+      // snapped the rest of the way and replayed the catch-up glide on top of
+      // a scroll the reader was already doing themselves.
+      if (allow && getPreferences().messages && old && atBottom && chatVisible && !suppressBottomFollow && Math.abs(bottom - old.bottom) > .5) {
+        // Bottom-follow is two separate operations in one pre-paint pass:
+        // first pin the real scroll position to the new bottom, then offset
+        // the timeline by exactly the absorbed delta. The browser is already
+        // logically at bottom, but the visible content starts where it was and
+        // glides upward only as this offset exponentially settles.
+        if (Math.abs(bottom - chat.scrollTop) > .5) chat.scrollTop = bottom;
+        // A transform on the rise target cascades to every descendant. The
+        // real agent-chat-timeline is a sibling of the footer, never an
+        // ancestor, but our fallback target (the rows' own container, since
+        // that testid is not shipped yet) can genuinely contain the footer as
+        // just another row in the same list. Give the footer the exact
+        // inverse offset every frame instead of just opting it out of the
+        // rise entirely -- that kept it glued, but also silently dropped the
+        // glide for every ordinary streaming tick where it is nested there,
+        // which is most of the turn, not just the rare cases this was for.
+        // Skip the counter-compensation while the footer's own WAAPI entrance
+        // animation is playing: both would write its transform every frame,
+        // and WAAPI's effect takes priority over a plain style write for as
+        // long as it is active, so our compensation was silently dropped
+        // for that whole window and then snapped in the instant the entrance
+        // animation ended -- read as the rise's eased offset being yanked
+        // away and handed back.
+        const counter = timeline && footer && timeline.contains(footer) && !active.has(footer)
+          ? footer
+          : null;
+        if (timeline) contentRise.start(timeline, chat.scrollTop - old.scrollTop, counter);
+      }
+      // The footer gets no animation of its own: it is glued to the bottom
+      // while a turn is running, pushed down only by new content, which is
+      // ordinary document flow with nothing for us to compensate. Animating
+      // it independently (gliding its measured displacement) chased every
+      // qualifying tick during a burst of layout changes -- new row, footer
+      // mounting, first chunk landing -- each firing its own rise on top of
+      // whatever was left of the last one, which is why it visibly slid up
+      // and settled several times in a row right after a message was sent.
+      chats.set(chat, {
+        seen, pending: candidates, running, streamingRenderer, scrollTop: chat.scrollTop, bottom,
+        visible: chatVisible, rehydratingUntil, turnStartUntil, contentRise, resizeObserver,
+        observedTimeline: timeline, observedFooter: footer,
+      });
     }
   }
   function refreshAmbient(allow = canAnimate(), selected: ReadonlySet<Region> = new Set(regions)) {
@@ -835,6 +1702,21 @@ function installWebMotion(): () => void {
       if (scrollDeadline) selected.delete('workspaces');
       if (!disposed) refreshAmbient(canAnimate(), selected);
     });
+  }
+  // MutationObserver runs after React commits but before the browser presents
+  // that commit. Chat text needs this boundary: measuring in the next rAF made
+  // the host paint the new line first, then start its compensating rise.
+  let refreshingChat = false;
+  function refreshChatBeforePaint() {
+    if (refreshingChat || disposed || suspended) return;
+    refreshingChat = true;
+    try {
+      const allow = canAnimate() && !elastic.isActive();
+      updateToolStates(allow);
+      updateMessages(allow);
+    } finally {
+      refreshingChat = false;
+    }
   }
   updateMotionFlags();
   refreshAmbient(false);
@@ -919,9 +1801,9 @@ function installWebMotion(): () => void {
       // Reused portal surfaces open by gaining role="dialog"/"tooltip".
       if (record.attributeName === 'role') { scheduleAmbient(['floating', 'controls']); continue; }
       if (structural || record.attributeName === 'aria-expanded' || target.matches(PANE) || target.querySelector(PANE)) schedule();
-      const meaningful = structural || ['aria-expanded', 'aria-selected', 'aria-busy'].includes(record.attributeName ?? '');
+      const meaningful = structural || record.type === 'characterData' || ['aria-expanded', 'aria-selected', 'aria-busy'].includes(record.attributeName ?? '');
       if (target.closest(CHAT)) {
-        if (meaningful) scheduleAmbient(['tools', 'messages']);
+        if (meaningful) refreshChatBeforePaint();
       } else if (target.closest(WORKSPACE_SCROLL)) {
         if (meaningful) scheduleAmbient(['workspaces', 'agents', 'controls']);
       } else if (target.closest(FILE_TREE + ', ' + CHANGE_TREE)) {
@@ -936,7 +1818,7 @@ function installWebMotion(): () => void {
       }
     }
   });
-  observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'role', 'aria-hidden', 'aria-expanded', 'aria-selected', 'aria-busy', 'data-status-bucket'] });
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['style', 'class', 'role', 'aria-hidden', 'aria-expanded', 'aria-selected', 'aria-busy', 'data-status-bucket'] });
   function clearCapture() {
     pending = null; treeTarget = null; pointerOrigin = null; layoutPolling = 0;
     window.clearTimeout(deadline); deadline = 0;
@@ -1015,11 +1897,11 @@ function installWebMotion(): () => void {
     quietUntil = Date.now() + 250;
     pending = null; treeTarget = null; stopAll();
   };
-  const onReduce = () => { edgePeek?.refresh(); updateMotionFlags(); if (reduceMotion.matches) { pending = null; stopAll(); refreshAmbient(false); } };
+  const onReduce = () => { edgePeek?.refresh(); updateMotionFlags(); if (reduceMotion.matches) { pending = null; stopAll(); clearChatMotion(); refreshAmbient(false); } };
   const unsubscribe = subscribePreferences(() => {
     try { window.localStorage.setItem(PREF_KEY, JSON.stringify(getPreferences())); } catch { /* optional persistence */ }
     edgePeek?.refresh();
-    pending = null; stopAll(); updateMotionFlags(); refreshAmbient(false);
+    pending = null; stopAll(); clearChatMotion(); updateMotionFlags(); refreshAmbient(false);
   });
   // RN Pressable / gesture handlers may commit on pointerup, before the DOM
   // click arrives. Measuring in click capture sees the final layout already.
@@ -1042,7 +1924,7 @@ function installWebMotion(): () => void {
     suspended = true; composing = false; clearCapture();
     window.clearTimeout(scrollDeadline); scrollDeadline = 0;
     window.cancelAnimationFrame(passiveFrame); passiveFrame = 0; dirty.clear();
-    stopAll(); elastic.reset(); elastic.refresh(); updateMotionFlags();
+    stopAll(); clearChatMotion(); elastic.reset(); elastic.refresh(); updateMotionFlags();
     // Exit copies are unnecessary while no motion is presented. Release
     // their detached DOM and rebuild clean baselines on return.
     workspaceLists.clear(); tabRows.clear(); floating.clear(); paneBaseline.clear(); paneTransition = null;
@@ -1125,6 +2007,6 @@ function installWebMotion(): () => void {
     window.clearTimeout(deadline); window.cancelAnimationFrame(frame); window.cancelAnimationFrame(passiveFrame);
     window.clearTimeout(scrollDeadline); dirty.clear();
     workspaceLists.clear(); tabRows.clear(); floating.clear(); paneBaseline.clear(); fileIcons.clear(); toolIcons.clear(); toolStates.clear(); agentStates.clear();
-    pending = null; treeTarget = null; stopAll();
+    pending = null; treeTarget = null; stopAll(); clearChatMotion();
   };
 }
