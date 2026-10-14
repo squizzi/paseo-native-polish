@@ -62,7 +62,7 @@ declare const window: {
   removeEventListener(type: string, callback: Listener, capture?: boolean): void;
 };
 interface Mutation { type: string; target: Element; attributeName: string | null; addedNodes: ArrayLike<Element>; removedNodes: ArrayLike<Element> }
-declare const MutationObserver: new (callback: (records: Mutation[]) => void) => { observe(target: Element, options: { subtree: boolean; childList: boolean; attributes: boolean; attributeFilter: string[] }): void; disconnect(): void };
+declare const MutationObserver: new (callback: (records: Mutation[]) => void) => { observe(target: Element, options: { subtree: boolean; childList: boolean; characterData: boolean; attributes: boolean; attributeFilter: string[] }): void; disconnect(): void };
 
 const TOOL = '[data-testid="tool-call-badge"], [data-testid="tool-call-group"]';
 const FILE_TREE = '[data-testid="file-explorer-tree-scroll"]';
@@ -75,6 +75,26 @@ const WORKSPACE_ROW = '[data-testid^="sidebar-workspace-row-"]';
 const WORKSPACE_SCROLL = '[data-testid="sidebar-project-workspace-list-scroll"], [data-testid="sidebar-status-list-scroll"]';
 const WORKSPACE_SECTION = '[data-testid^="sidebar-workspace-list-"], [data-testid="sidebar-pinned-list"], [data-testid^="sidebar-status-group-rows-"]';
 const WORKSPACE_ANCHOR = WORKSPACE_ROW + ', ' + PROJECT + ', ' + STATUS + ', [data-testid="sidebar-pinned-section-header"], [data-testid*="sidebar-"][data-testid*="show-more"]';
+const LABEL_CHIP = '[data-testid^="workspace-label-chip-"]';
+// Every other meta-row item (branch, project, checks, service, host, PR) is a
+// single instance per row, so unlike labels it gets a fixed logical key: the
+// row shouldn't replay an exit/entrance just because a check's state changed
+// its testid, or a PR's host changed its badge id.
+const META_ITEM = LABEL_CHIP + ', [data-testid="sidebar-workspace-branch"], [data-testid="sidebar-workspace-project"], '
+  + '[data-testid^="sidebar-workspace-checks-"], [data-testid="workspace-service"], [data-testid="workspace-service-unhealthy"], '
+  + '[data-testid^="host-badge-"], [role="link"]';
+function metaItemKey(el: Element): string {
+  const testid = el.getAttribute('data-testid') ?? '';
+  if (testid.startsWith('workspace-label-chip-')) return testid;
+  if (testid.startsWith('host-badge-')) return 'host';
+  if (testid.startsWith('sidebar-workspace-checks-')) return 'checks';
+  if (testid === 'workspace-service' || testid === 'workspace-service-unhealthy') return 'service';
+  if (testid === 'sidebar-workspace-branch') return 'branch';
+  if (testid === 'sidebar-workspace-project') return 'project';
+  return 'pr';
+}
+const TITLE_EXCLUDED = '[role="button"],[role="menuitem"],svg';
+const TITLE_REVEAL_HORIZON_MS = 150;
 const PREF_KEY = 'paseo-native-polish:preferences:v1';
 const EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
 const all = (root: Element, selector: string) => Array.from(root.querySelectorAll(selector));
@@ -126,6 +146,24 @@ function tabSlot(tab: Element, scroll: Element): Element {
   return slot;
 }
 const chevron = (svg: Element) => Array.from(svg.querySelectorAll('path')).some(path => /^m9\s*18\s*6-6-6-6$/i.test(path.getAttribute('d') ?? ''));
+// The rendered title has no testid of its own. It is the first leaf text node
+// in the row that is not inside a tagged badge/menu/icon, which always comes
+// before the meta row (branch, labels, checks) in document order.
+function workspaceTitleNode(row: Element): Element | null {
+  const tagged = (el: Element) => {
+    for (let at: Element | null = el; at && at !== row; at = at.parentElement) if (at.getAttribute('data-testid') || at.matches(TITLE_EXCLUDED)) return true;
+    return false;
+  };
+  for (const el of all(row, '*')) if (!el.children.length && el.textContent?.trim() && !tagged(el)) return el;
+  return null;
+}
+function computeRevealStep(backlog: number, elapsedMs: number): number {
+  if (backlog <= 0) return 0;
+  const elapsed = Math.min(Math.max(elapsedMs, 0), 250);
+  if (elapsed <= 0) return 0;
+  if (elapsed >= TITLE_REVEAL_HORIZON_MS) return backlog;
+  return Math.min(backlog, Math.max(1, Math.ceil((backlog * elapsed) / TITLE_REVEAL_HORIZON_MS)));
+}
 function paneBoxes(): Map<string, PaneBox> {
   return new Map(all(document.body, PANE).filter(visible).map(element => [element.getAttribute('data-testid')!, { element, box: rect(element) }]));
 }
@@ -317,7 +355,7 @@ function installWebMotion(): () => void {
     for (const el of all(copy, 'iframe, video, audio, input, textarea')) el.remove();
     return copy;
   }
-  function ghost(before: Snapshot, horizontal = 0) {
+  function ghost(before: Snapshot, horizontal = 0, milliseconds = duration()) {
     const copy = exitCopy(before);
     const style = window.getComputedStyle(before.element);
     const r = before.box;
@@ -329,7 +367,7 @@ function installWebMotion(): () => void {
     for (const [key, value] of Object.entries(values)) copy.style.setProperty(key, value, 'important');
     document.body.appendChild(copy);
     ghosts.add(copy);
-    animate(copy, [{ opacity: 1, transform: 'translate(0,0)', clipPath: 'inset(0 0 0 0)' }, { opacity: 0, transform: `translate(${horizontal}px,-3px)`, clipPath: horizontal ? 'inset(0 0 0 0)' : 'inset(0 0 100% 0)' }], () => { copy.remove(); ghosts.delete(copy); });
+    animate(copy, [{ opacity: 1, transform: 'translate(0,0)', clipPath: 'inset(0 0 0 0)' }, { opacity: 0, transform: `translate(${horizontal}px,-3px)`, clipPath: horizontal ? 'inset(0 0 0 0)' : 'inset(0 0 100% 0)' }], () => { copy.remove(); ghosts.delete(copy); }, 0, milliseconds);
   }
   function revealPanel(el: Element) {
     const width = rect(el).width;
@@ -437,6 +475,22 @@ function installWebMotion(): () => void {
     projects: Map<string, Snapshot>; anchors: Map<string, WorkspaceAnchor>; expanded: Map<string, string | null>;
   }
   let workspaceLists = new Map<Element, WorkspaceList>();
+  // Keep the workspace row as well as the label's DOM snapshot. React can
+  // remove the final meta-container along with the label, leaving the label's
+  // parent disconnected by the time this observer gets to animate it. The row
+  // is still mounted and is the thing whose shrinking height must be owned.
+  interface WorkspaceMetaState { shot: Snapshot; row: Element; rowHeight: number; top: number; left: number }
+  let workspaceMeta = new Map<string, Map<string, WorkspaceMetaState>>();
+  let workspaceTitleBaseline = new Map<string, string>();
+  interface TitleCover { overlay: Element; restoreNode: () => void }
+  interface TitleReveal { key: string; target: string; revealed: number; cover: TitleCover; stop: () => void }
+  const titleReveals = new Map<Element, TitleReveal>();
+  // A row whose reveal owns it is looked up here instead of re-deriving its
+  // title node from the DOM, whose text is transiently empty/partial mid-reveal
+  // and would otherwise be misidentified as a different row element entirely.
+  const titleRevealKeys = new Map<string, Element>();
+  let titleFrame = 0;
+  let titleLastTime = 0;
   interface FloatingSnapshot extends Snapshot { opacity: number; hostExit: boolean }
   let floating = new Map<Element, FloatingSnapshot>();
   let paneBaseline = paneBoxes();
@@ -515,6 +569,49 @@ function installWebMotion(): () => void {
     before.parent.insertBefore(copy, before.next?.parentElement === before.parent ? before.next : null);
     ghosts.add(copy);
     animate(copy, [{ width: `${r.width}px`, opacity: 1 }, { width: '0px', opacity: 0 }], () => { copy.remove(); ghosts.delete(copy); }, 0, Math.round(duration() * .75));
+  }
+  // The host eases its own row to the content's new, smaller measured height
+  // with overflow clipped to that target. Our own in-flow exit/entrance still
+  // needs the old, larger extent for its own duration, or the host's already-
+  // shrinking clip silently hides it. Relax any clipping ancestor up to the
+  // row for that window, then let it settle back once our clone is gone.
+  function releaseRowClip(from: Element, row: Element): () => void {
+    const restores: (() => void)[] = [];
+    for (let at: Element | null = from; at && at !== row; at = at.parentElement) {
+      const style = window.getComputedStyle(at);
+      const clipped = /^(hidden|clip)$/.test(style.getPropertyValue('overflow-y') || style.getPropertyValue('overflow'));
+      if (clipped || at.style.getPropertyValue('height')) restores.push(temporaryStyles(at, { overflow: 'visible', height: 'auto', 'max-height': 'none' }));
+    }
+    return () => { for (const restore of restores) restore(); };
+  }
+  // The host has already committed the smaller workspace row by the time the
+  // observer runs. Never re-expand that row: its flex/grid alignment would
+  // reflow the title, unread dot, and timestamp while its height animates.
+  // Instead, retain the removed chips as fixed ghosts and collapse equivalent
+  // trailing space after the committed row. Following workspaces ease upward,
+  // while every surviving part of this row stays in its final layout.
+  function collapseMetaItems(items: WorkspaceMetaState[]) {
+    if (!items.length) return;
+    // A final label commonly takes its now-empty parent with it. Its saved
+    // workspace row gives us a height owner even though every label parent is
+    // gone, so the next workspace does not jump upward before the ghost fades.
+    const row = items.find(item => item.row.isConnected)?.row
+      ?? items.find(item => item.shot.parent?.isConnected)?.shot.parent?.closest(WORKSPACE_ROW)
+      ?? null;
+    if (!row) { for (const item of items) ghost(item.shot); return; }
+    const afterHeight = rect(row).height;
+    const beforeHeight = Math.max(...items.map(item => item.rowHeight));
+    const milliseconds = Math.round(duration() * .75);
+    for (const item of items) ghost(item.shot, 0, milliseconds);
+    const shrink = beforeHeight - afterHeight;
+    if (shrink <= 1) return;
+    const baseMargin = parseFloat(window.getComputedStyle(row).getPropertyValue('margin-bottom')) || 0;
+    const expandedMargin = baseMargin + shrink;
+    // The added margin restores the following row to its pre-removal position
+    // without changing this row's own child layout. Animate it back to the
+    // host baseline to produce the same smooth vertical collapse.
+    const restoreRow = temporaryStyles(row, { 'margin-bottom': `${expandedMargin}px` });
+    animate(row, [{ marginBottom: `${expandedMargin}px` }, { marginBottom: `${baseMargin}px` }], restoreRow, 0, milliseconds);
   }
   function updateWorkspaceRows(allow: boolean) {
     const nextLists = new Map<Element, WorkspaceList>();
@@ -632,6 +729,213 @@ function installWebMotion(): () => void {
       }
     }
     workspaceLists = nextLists;
+  }
+  // Covers labels plus every other meta-row item (branch, project, checks,
+  // service, host badge, PR) with the same add/remove treatment. Rows are
+  // scanned per scroll container, not per-row visibility (unlike live()): a
+  // row scrolled just out of view must still be tracked, or the next time it
+  // scrolls back in looks like a fresh mount and its baseline is lost.
+  function updateWorkspaceMeta(allow: boolean) {
+    const nextLists = new Map<string, Map<string, WorkspaceMetaState>>();
+    for (const scroll of live(WORKSPACE_SCROLL)) {
+      for (const row of all(scroll, WORKSPACE_ROW).filter(el => !el.closest('[data-native-polish-ghost]'))) {
+        const key = row.getAttribute('data-testid');
+        if (!key) continue;
+        const old = workspaceMeta.get(key);
+        const rowHeight = rect(row).height;
+        const items = all(row, META_ITEM).filter(el => !el.closest('[data-native-polish-ghost]')).slice(0, 40);
+        const entries = items.map(item => ({ item, id: metaItemKey(item) }));
+        const present = new Set(entries.map(entry => entry.id));
+        const motionAllowed = allow && getPreferences().sidebars && !!old && Date.now() >= quietUntil;
+        const removed = old ? Array.from(old.keys()).filter(id => !present.has(id)) : [];
+        const current = new Map<string, WorkspaceMetaState>();
+        for (const { item, id } of entries) {
+          const previous = old?.get(id);
+          // If a second new label is still entering when its sibling is
+          // removed, first settle it at Paseo's new layout. Its fresh box is
+          // then a reliable FLIP destination instead of an in-flight width 0.
+          if (motionAllowed && removed.length && active.has(item)) active.get(item)?.();
+          const box = rect(item);
+          current.set(id, active.has(item) && previous ? previous : { shot: snapshot(item), row, rowHeight, top: box.top, left: box.left });
+        }
+        nextLists.set(key, current);
+        // A row discovered for the first time has no baseline: its items are
+        // already mounted, not just added, so they must not fade in.
+        if (!motionAllowed || !old) continue;
+        const added = Array.from(current.keys()).filter(id => !old.has(id));
+        let entered = 0;
+        for (const id of added) {
+          const state = current.get(id)!;
+          const el = state.shot.element;
+          if (active.has(el)) continue;
+          const width = state.shot.box.width, height = state.shot.box.height;
+          if (width < 2 || height < 2) continue;
+          // Growing the item's own box (not just its opacity) slides it into
+          // flow, naturally reflowing same-line siblings into place the same
+          // way removal does — a separate reposition transform on those
+          // siblings would fight this real layout change instead of helping it.
+          // It stays invisible until the box is nearly full size (showing text
+          // while the box is still small and widening reads as letters typing
+          // in), but that fade-in only needs a short tail — the grow gets
+          // nearly the whole duration so the sibling's reflow reads as a slide.
+          const restore = temporaryStyles(el, { overflow: 'hidden', 'max-width': `${width}px`, 'max-height': `${height}px`, 'flex-shrink': '0' });
+          const releaseClip = releaseRowClip(el, el.closest(WORKSPACE_SCROLL) ?? row);
+          animate(el, [
+            { width: '0px', height: '0px', opacity: 0, transform: 'translateY(-4px)' },
+            { width: `${width}px`, height: `${height}px`, opacity: 0, transform: 'translateY(0)', offset: 0.85 },
+            { width: `${width}px`, height: `${height}px`, opacity: 1, transform: 'translateY(0)' },
+          ], () => { restore(); releaseClip(); }, Math.min(entered++ * 40, 160));
+        }
+        collapseMetaItems(removed.map(id => old.get(id)!));
+        // The fixed removal ghost intentionally does not perturb the live
+        // meta flow. Animate only surviving items from their old coordinates
+        // to the host's final slot, so two labels entering followed by one
+        // removal remains fluid without reflowing the workspace title.
+        if (removed.length) for (const [id, state] of current) {
+          if (added.includes(id)) continue;
+          const previous = old.get(id);
+          if (!previous) continue;
+          const dx = previous.left - state.left;
+          const dy = previous.top - state.top;
+          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) animate(state.shot.element, [{ transform: `translate(${dx}px,${dy}px)` }, { transform: 'translate(0,0)' }]);
+        }
+        // Labels share a max-width budget: removing or adding one can also
+        // change how much a surviving chip's own text gets truncated to. The
+        // host already computed that width correctly for the new count by the
+        // time we see it here, so its width snaps; only its position eases.
+      }
+    }
+    workspaceMeta = nextLists;
+  }
+  // Paseo owns the actual workspace-name node. During a rename we hide only
+  // that leaf (retaining its layout and the host row's real background), then
+  // temporarily draw the old/new title above it.
+  function paintTitleCover(overlay: Element, node: Element) {
+    const r = rect(node);
+    const style = window.getComputedStyle(node);
+    const values: Record<string, string> = {
+      position: 'fixed', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`,
+      display: 'block', margin: '0', padding: '0', 'box-sizing': 'border-box', overflow: 'hidden', 'pointer-events': 'none', 'z-index': '1',
+      'background-color': 'transparent', color: style.getPropertyValue('color'),
+      'font-family': style.getPropertyValue('font-family'), 'font-size': style.getPropertyValue('font-size'),
+      'font-style': style.getPropertyValue('font-style'), 'font-weight': style.getPropertyValue('font-weight'),
+      'font-variant': style.getPropertyValue('font-variant'), 'font-stretch': style.getPropertyValue('font-stretch'),
+      'line-height': style.getPropertyValue('line-height'), 'letter-spacing': style.getPropertyValue('letter-spacing'),
+      'word-spacing': style.getPropertyValue('word-spacing'), 'text-transform': style.getPropertyValue('text-transform'),
+      'text-indent': style.getPropertyValue('text-indent'), 'text-align': style.getPropertyValue('text-align'),
+      'white-space': style.getPropertyValue('white-space'), direction: style.getPropertyValue('direction'),
+    };
+    for (const [property, value] of Object.entries(values)) overlay.style.setProperty(property, value, 'important');
+  }
+  function titleRevealCover(node: Element): TitleCover {
+    const overlay = document.createElement('div');
+    overlay.setAttribute('data-native-polish-reveal', '');
+    overlay.setAttribute('aria-hidden', 'true');
+    paintTitleCover(overlay, node);
+    const restoreNode = temporaryStyles(node, { visibility: 'hidden' });
+    document.body.appendChild(overlay);
+    return { overlay, restoreNode };
+  }
+  function removeTitleCovers() {
+    for (const state of Array.from(titleReveals.values())) state.stop();
+  }
+  function tickTitleReveals() {
+    titleFrame = 0;
+    const now = Date.now();
+    const elapsed = titleLastTime ? now - titleLastTime : 16;
+    titleLastTime = now;
+    for (const [, state] of Array.from(titleReveals)) {
+      // React may replace the leaf text span immediately after its mutation.
+      // The overlay is intentionally independent of that host node: removing
+      // it just because its original anchor was reconciled would expose the
+      // final host title before a single reveal frame can be painted.
+      if (!state.cover.overlay.isConnected) { state.stop(); continue; }
+      const chars = Array.from(state.target);
+      const step = computeRevealStep(chars.length - state.revealed, elapsed);
+      if (step > 0) {
+        state.revealed = Math.min(chars.length, state.revealed + step);
+        state.cover.overlay.textContent = chars.slice(0, state.revealed).join('');
+      }
+      if (state.revealed >= chars.length) state.stop();
+    }
+    if (titleReveals.size) titleFrame = window.requestAnimationFrame(tickTitleReveals);
+    else titleLastTime = 0;
+  }
+  function startTitleReveal(key: string, node: Element, target: string, cover: TitleCover) {
+    active.get(node)?.();
+    const stop = () => {
+      titleReveals.delete(node);
+      if (titleRevealKeys.get(key) === node) titleRevealKeys.delete(key);
+      if (active.get(node) === stop) active.delete(node);
+      cover.restoreNode();
+      cover.overlay.remove();
+    };
+    active.set(node, stop);
+    titleReveals.set(node, { key, target, revealed: 0, cover, stop });
+    titleRevealKeys.set(key, node);
+    if (!titleFrame) { titleLastTime = 0; titleFrame = window.requestAnimationFrame(tickTitleReveals); }
+  }
+  // Called straight from the mutation observer, not the deferred/batched
+  // ambient pass: that pass runs on the next animation frame, by which point
+  // the browser has already painted the host's committed rename for at least
+  // one frame. Installing the cover here, in the same microtask as the host
+  // mutation, keeps the final name from flashing before our reveal starts.
+  function syncTitleReveal(row: Element) {
+    if (!canAnimate() || !getPreferences().sidebars || Date.now() < quietUntil) return;
+    const key = row.getAttribute('data-testid');
+    if (!key || titleRevealKeys.has(key)) return;
+    const node = workspaceTitleNode(row);
+    if (!node || !visible(node)) return;
+    const text = node.textContent ?? '';
+    const previous = workspaceTitleBaseline.get(key);
+    if (previous === undefined || previous === text) return;
+    const cover = titleRevealCover(node);
+    startTitleReveal(key, node, text, cover);
+  }
+  // A React rename can replace the old leaf span outright. In that case the
+  // mutation target has already detached, so looking only at target.closest()
+  // misses the rename and leaves the next animation-frame scan to replay it
+  // after it was visible. The added node is still connected under its row.
+  function syncTitleRevealFromMutation(record: Mutation, target: Element | null) {
+    const candidates: Element[] = target ? [target] : [];
+    if (record.type === 'childList') for (const node of Array.from(record.addedNodes)) {
+      const element = elementOf(node);
+      if (element) candidates.push(element);
+    }
+    for (const candidate of candidates) {
+      const row = candidate.closest(WORKSPACE_ROW) ?? candidate.querySelector(WORKSPACE_ROW);
+      if (row?.closest(WORKSPACE_SCROLL)) { syncTitleReveal(row); return; }
+    }
+  }
+  // Scoped per scroll container, not per-row visibility (unlike live()): a
+  // row scrolled just out of view must still be tracked, or the next time it
+  // scrolls back in looks like a fresh mount and its baseline is lost.
+  function updateWorkspaceTitles(allow: boolean) {
+    const nextBaseline = new Map<string, string>();
+    for (const scroll of live(WORKSPACE_SCROLL)) {
+      for (const row of all(scroll, WORKSPACE_ROW).filter(el => !el.closest('[data-native-polish-ghost]'))) {
+        const key = row.getAttribute('data-testid');
+        if (!key) continue;
+        const node = workspaceTitleNode(row);
+        if (!node) continue;
+        // A row whose title is already revealing must not be re-scanned: its
+        // source leaf can be replaced while the temporary overlay finishes.
+        const activeNode = titleRevealKeys.get(key);
+        const activeReveal = activeNode ? titleReveals.get(activeNode) : undefined;
+        if (activeReveal) {
+          nextBaseline.set(key, activeReveal.target);
+          continue;
+        }
+        const text = node.textContent ?? '';
+        nextBaseline.set(key, text);
+        const previous = workspaceTitleBaseline.get(key);
+        // A renamed title is a replacement, not growth of the same string: always
+        // retype from the first character rather than diffing against the old one.
+        if (previous === undefined || previous === text || !allow || !getPreferences().sidebars || Date.now() < quietUntil) continue;
+        startTitleReveal(key, node, text, titleRevealCover(node));
+      }
+    }
+    workspaceTitleBaseline = nextBaseline;
   }
   function updateTabs(allow: boolean) {
     const nextRows = new Map<Element, Map<string, TabState>>();
@@ -814,7 +1118,7 @@ function installWebMotion(): () => void {
     if (selected.has('elastic')) elastic.refresh();
     allow = allow && !elastic.isActive();
     if (selected.has('controls')) decorateControls();
-    if (selected.has('workspaces')) updateWorkspaceRows(allow);
+    if (selected.has('workspaces')) { updateWorkspaceRows(allow); updateWorkspaceMeta(allow); updateWorkspaceTitles(allow); }
     if (selected.has('tabs')) updateTabs(allow);
     if (selected.has('floating')) updateFloating(allow);
     if (selected.has('panes')) updatePaneLayout(allow);
@@ -900,8 +1204,9 @@ function installWebMotion(): () => void {
     if (disposed || suspended) return;
     for (const record of records) {
       const target = elementOf(record.target);
-      if (!target || target.closest('[data-native-polish-ghost],[data-native-polish-peek-trigger]')) continue;
       const structural = record.type === 'childList';
+      if (structural || record.type === 'characterData') syncTitleRevealFromMutation(record, target);
+      if (!target || target.closest('[data-native-polish-ghost],[data-native-polish-peek-trigger],[data-native-polish-reveal]')) continue;
       // Discover an editor's scroll surface when CodeMirror mounts into its
       // host. Token, selection and caret updates remain excluded from scans.
       if (target.closest(EDITING)) {
@@ -919,11 +1224,13 @@ function installWebMotion(): () => void {
       // Reused portal surfaces open by gaining role="dialog"/"tooltip".
       if (record.attributeName === 'role') { scheduleAmbient(['floating', 'controls']); continue; }
       if (structural || record.attributeName === 'aria-expanded' || target.matches(PANE) || target.querySelector(PANE)) schedule();
-      const meaningful = structural || ['aria-expanded', 'aria-selected', 'aria-busy'].includes(record.attributeName ?? '');
+      const meaningful = structural || record.type === 'characterData' || ['aria-expanded', 'aria-selected', 'aria-busy'].includes(record.attributeName ?? '');
       if (target.closest(CHAT)) {
         if (meaningful) scheduleAmbient(['tools', 'messages']);
       } else if (target.closest(WORKSPACE_SCROLL)) {
-        if (meaningful) scheduleAmbient(['workspaces', 'agents', 'controls']);
+        if (meaningful) {
+          scheduleAmbient(['workspaces', 'agents', 'controls']);
+        }
       } else if (target.closest(FILE_TREE + ', ' + CHANGE_TREE)) {
         if (meaningful) scheduleAmbient(['files', 'controls']);
       } else if (target.closest(TAB_ROW)) {
@@ -936,7 +1243,7 @@ function installWebMotion(): () => void {
       }
     }
   });
-  observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'role', 'aria-hidden', 'aria-expanded', 'aria-selected', 'aria-busy', 'data-status-bucket'] });
+  observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['style', 'class', 'role', 'aria-hidden', 'aria-expanded', 'aria-selected', 'aria-busy', 'data-status-bucket'] });
   function clearCapture() {
     pending = null; treeTarget = null; pointerOrigin = null; layoutPolling = 0;
     window.clearTimeout(deadline); deadline = 0;
@@ -1015,11 +1322,11 @@ function installWebMotion(): () => void {
     quietUntil = Date.now() + 250;
     pending = null; treeTarget = null; stopAll();
   };
-  const onReduce = () => { edgePeek?.refresh(); updateMotionFlags(); if (reduceMotion.matches) { pending = null; stopAll(); refreshAmbient(false); } };
+  const onReduce = () => { edgePeek?.refresh(); updateMotionFlags(); if (reduceMotion.matches) { pending = null; stopAll(); removeTitleCovers(); refreshAmbient(false); } };
   const unsubscribe = subscribePreferences(() => {
     try { window.localStorage.setItem(PREF_KEY, JSON.stringify(getPreferences())); } catch { /* optional persistence */ }
     edgePeek?.refresh();
-    pending = null; stopAll(); updateMotionFlags(); refreshAmbient(false);
+    pending = null; stopAll(); removeTitleCovers(); updateMotionFlags(); refreshAmbient(false);
   });
   // RN Pressable / gesture handlers may commit on pointerup, before the DOM
   // click arrives. Measuring in click capture sees the final layout already.
@@ -1043,10 +1350,12 @@ function installWebMotion(): () => void {
     window.clearTimeout(scrollDeadline); scrollDeadline = 0;
     window.cancelAnimationFrame(passiveFrame); passiveFrame = 0; dirty.clear();
     stopAll(); elastic.reset(); elastic.refresh(); updateMotionFlags();
+    window.cancelAnimationFrame(titleFrame); titleFrame = 0; titleLastTime = 0;
     // Exit copies are unnecessary while no motion is presented. Release
     // their detached DOM and rebuild clean baselines on return.
     workspaceLists.clear(); tabRows.clear(); floating.clear(); paneBaseline.clear(); paneTransition = null;
     fileIcons.clear(); toolIcons.clear(); toolStates.clear(); agentStates.clear();
+    workspaceMeta.clear(); workspaceTitleBaseline.clear(); removeTitleCovers(); titleReveals.clear(); titleRevealKeys.clear();
   }
   function resumeMotion() {
     if (disposed || document.hidden || !document.hasFocus()) return;
@@ -1123,8 +1432,10 @@ function installWebMotion(): () => void {
     window.removeEventListener('focus', onWindowFocus);
     reduceMotion.removeEventListener('change', onReduce);
     window.clearTimeout(deadline); window.cancelAnimationFrame(frame); window.cancelAnimationFrame(passiveFrame);
+    window.cancelAnimationFrame(titleFrame); titleFrame = 0;
     window.clearTimeout(scrollDeadline); dirty.clear();
     workspaceLists.clear(); tabRows.clear(); floating.clear(); paneBaseline.clear(); fileIcons.clear(); toolIcons.clear(); toolStates.clear(); agentStates.clear();
+    workspaceMeta.clear(); workspaceTitleBaseline.clear(); removeTitleCovers(); titleReveals.clear(); titleRevealKeys.clear();
     pending = null; treeTarget = null; stopAll();
   };
 }
