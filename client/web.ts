@@ -360,7 +360,11 @@ function installWebMotion(): () => void {
     // Left sidebar is retained with display:none. Keep its real layout slot
     // for the duration of the exit, while preserving host aria-hidden/input state.
     panelExits.add(el);
-    const restore = temporaryStyles(el, { display: 'flex', overflow: 'hidden', 'min-width': '0', 'box-sizing': 'border-box', 'pointer-events': 'none', 'flex-shrink': '0' });
+    // The host drops the header's top inset (traffic-light clearance) as soon
+    // as aria-expanded flips, before our width collapse finishes. Pin it so
+    // content doesn't jump up into that space for the rest of the animation.
+    const paddingTop = window.getComputedStyle(el).getPropertyValue('padding-top');
+    const restore = temporaryStyles(el, { display: 'flex', overflow: 'hidden', 'min-width': '0', 'box-sizing': 'border-box', 'pointer-events': 'none', 'flex-shrink': '0', 'padding-top': paddingTop });
     el.style.setProperty('display', 'flex', 'important');
     const content = Array.from(el.children)[0];
     const restoreContent = content ? temporaryStyles(content, { 'min-width': `${before.box.width}px` }) : () => {};

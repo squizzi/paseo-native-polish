@@ -177,10 +177,12 @@ export function installEdgePeek(options: {
   function restore(handoff = false) {
     if (!current) return;
     current.restoring = true;
+    // A handoff means a real toggle action (click or shortcut) is about to
+    // fire on its own; a synthetic click here would double-toggle the host.
+    if (handoff) { cleanup(true); return; }
     // Use the original control only while it still belongs to this screen.
     // Never toggle a newly navigated workspace's independent visibility.
     if (current.toggle.isConnected && current.toggle.getAttribute('aria-expanded') === 'true') click(current.toggle);
-    if (handoff) { cleanup(true); return; }
     awaitClosedLayout();
     restoreTimer = window.setTimeout(() => {
       // A failed host control must not leave a permanent injected overlay.
