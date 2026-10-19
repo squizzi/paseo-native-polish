@@ -39,5 +39,10 @@
     "desktop",
     "animation",
     "motion"
-  ]
+  ],
+  "dependencies": {
+    "@getpaseo/highlight": "^0.11.1",
+    "markdown-it": "^14.1.0",
+    "react-native-markdown-display": "^7.0.2"
+  }
 }

@@ -14,7 +14,7 @@ Motion for Paseo's existing interface. Sidebars, panes, tabs and disclosures tra
 | Tabs | Animate opening, closing and reordering; transition selection colors. |
 | Explorer and timeline | Animate tree expansion/collapse, folder arrows, tool calls and thinking details. |
 | Overlays and controls | Short menu/dialog transitions, button press feedback and hover changes. Tooltips keep Paseo's own motion and hover lifecycle. |
-| Agent activity | Transition status changes and fade newly appended messages once near the conversation tail. |
+| Agent activity | Reveal coalesced streamed Markdown arrivals with core's opacity fade, plus core-style snap-to-line growth. Reveal tool labels and summaries at their natural text width as details arrive. Transition status changes and newly appended messages. |
 | Scrolling | Damped edge rebound for agent conversations, workspace lists, Files, Changes, Markdown previews and editable/read-only file Source views. Normal scrolling and inertia stay with Paseo. |
 
 Workspace rows also move smoothly when pinned, unpinned or moved between status groups. Project creation/removal animates the group and surrounding list. These transitions use the sidebar motion setting.
@@ -33,7 +33,7 @@ File scrolling covers rendered Markdown and editable/read-only Source views for 
 
 The desktop fallback is an approximation: Paseo's Electron window does not currently enable `scrollBounce`, and a client plugin cannot change that main-process option. Exact macOS rebound requires host support.
 
-Streaming updates are coalesced by surface; wheel bursts rebase list snapshots after input settles. Text editing, selection and IME composition bypass global motion captures. Editor/terminal rendering does not trigger app layout scans. Motion and scans pause when the window loses focus or becomes hidden; returning rebases the current UI without replaying background changes. Tree commits reuse one bounded layout capture.
+Streaming assistant rows use a plugin-owned React Native Markdown renderer while live, retaining each coalesced arrival as one stable fade span and matching core's prose metrics, spacing and theme colors. Inline code, fenced code, headings, links, images, lists, quotes, tables and incomplete streaming syntax remain formatted. Completed rows return to Paseo's renderer; the adapter suppresses a second message entrance at that handoff. Streaming updates are coalesced by surface; wheel bursts rebase list snapshots after input settles. Text editing, selection and IME composition bypass global motion captures. Editor/terminal rendering does not trigger app layout scans. Motion and scans pause when the window loses focus or becomes hidden; returning rebases the current UI without replaying background changes. Tree commits reuse one bounded layout capture.
 
 ## Install
 
@@ -77,6 +77,9 @@ paseo plugin reload paseo-native-polish
 index.client.tsx       Client registration and lifecycle
 client/settings.tsx   Settings UI using Paseo components
 client/preferences.ts Reactive preferences
+client/streaming-markdown.tsx Streaming Markdown parsing, rendering and text fades
+client/streaming-markdown-parser.ts Provisional rules for incomplete stream tails
+client/stable-markdown-parser.ts Deterministic Markdown AST keys matching core
 client/web.ts         Web-only DOM and animation adapter
 client/elastic-scroll.ts Web scroll boundary spring and cleanup
 client/edge-peek.ts    Temporary desktop edge preview and restoration
