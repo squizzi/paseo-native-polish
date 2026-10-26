@@ -232,11 +232,11 @@ function captureTree(target: Element): Tree | null {
 
 export function installMotion(): () => void {
   if (Platform.OS !== 'web' || typeof document === 'undefined' || typeof window === 'undefined' || typeof MutationObserver === 'undefined') return () => {};
-  return leaseMotion('0.4.13', installWebMotion);
+  return leaseMotion('0.4.14', installWebMotion);
 }
 
 function installWebMotion(): () => void {
-  document.body.setAttribute("data-native-polish", "0.4.13");
+  document.body.setAttribute("data-native-polish", "0.4.14");
 
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   try {
@@ -248,7 +248,7 @@ function installWebMotion(): () => void {
       setPreferences(next);
     }
   } catch { /* A blocked storage area should not disable motion. */ }
-  console.info('[Native Polish] loaded', JSON.stringify({ version: '0.4.13', preferences: getPreferences(), reduceMotion: reduceMotion.matches }));
+  console.info('[Native Polish] loaded', JSON.stringify({ version: '0.4.14', preferences: getPreferences(), reduceMotion: reduceMotion.matches }));
   let disposed = false;
   let pending: Capture | null = null;
   let frame = 0;
@@ -698,9 +698,14 @@ function installWebMotion(): () => void {
   }
   function updateFloating(allow: boolean) {
     const next = new Map<Element, FloatingSnapshot>();
+    const panelOwners = new Set(panels().values());
     for (const el of live(FLOATING).filter(el => { const r = rect(el); return r.right > 0 && r.left < window.innerWidth; }).slice(0, 12)) {
       // Nested menu pages/dialog children must not get two entrances.
       if (el.parentElement?.closest(FLOATING)) continue;
+      // A docked sidebar that also carries an overlay role (e.g. a reused
+      // portal gaining role="dialog" on open) already has its own width-based
+      // entrance from revealPanel; a second fade here would race it.
+      if (panelOwners.has(el) || hasAncestor(el, panelOwners)) continue;
       const previous = floating.get(el);
       const host = previous ? null : hostMotion(el);
       const opacity = parseFloat(window.getComputedStyle(el).getPropertyValue('opacity'));
