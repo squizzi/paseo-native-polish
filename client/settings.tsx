@@ -8,8 +8,8 @@ export function MotionSettings({ theme, layout }: PluginSurfaceProps) {
     <View style={{ gap: 20, paddingVertical: layout.compact ? 12 : 20 }}>
       <Text style={{ color: theme.colors.foregroundMuted, lineHeight: 21 }}>
         {Platform.OS === "web"
-          ? "Responsive motion for Paseo. Changes apply immediately in this client. System Reduce Motion is always respected."
-          : "This first version adds motion to the desktop and web client. Mobile keeps its existing native transitions."}
+          ? "Responsive motion and smooth streaming text for Paseo. Changes apply immediately in this client. System Reduce Motion is always respected."
+          : "Native Polish is designed for Paseo's desktop and web app. Mobile keeps its existing core rendering and native transitions."}
       </Text>
       <SettingsSection title="Motion">
         <SettingsCard>
