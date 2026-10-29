@@ -3,6 +3,7 @@ export type FooterMotionFrame = Record<string, string | number>;
 export const WORKED_FOOTER_ENTRANCE_DURATION_MS = 320;
 export const WORKED_FOOTER_TEXT_BLUR_PX = 4;
 export const USER_MESSAGE_AFTER_FOOTER_SLIDE_DELAY_MS = 140;
+export const BOTTOM_SCROLL_EPSILON_PX = 8;
 
 export interface WorkedFooterEntranceMotion {
   durationMs: number;
@@ -61,6 +62,54 @@ export function shouldExpandWorkedFooterLayout(input: {
   );
 }
 
+export function isFollowingScrollBottom(input: {
+  currentScrollTop: number;
+  maxScrollTop: number;
+  previousScrollTop?: number;
+  previousCompensatedScrollTop?: number;
+  previousMaxScrollTop?: number;
+  userScrolledUp?: boolean;
+  holdingPendingBottom?: boolean;
+}): {
+  atBottom: boolean;
+  wasFollowing: boolean;
+  userScrolledUp: boolean;
+} {
+  const hasPrevious =
+    Number.isFinite(input.previousScrollTop) &&
+    Number.isFinite(input.previousMaxScrollTop);
+  const scrolledUpFromBottom =
+    hasPrevious &&
+    input.currentScrollTop < input.previousScrollTop! - 0.5 &&
+    input.maxScrollTop - input.currentScrollTop > 1;
+  const atExactBottom = input.maxScrollTop - input.currentScrollTop <= 1;
+  const currentlyAtBottom =
+    input.maxScrollTop - input.currentScrollTop <= BOTTOM_SCROLL_EPSILON_PX;
+  const userScrolledUp = atExactBottom
+    ? false
+    : scrolledUpFromBottom || Boolean(input.userScrolledUp);
+  const previousScrollAtBottom =
+    hasPrevious &&
+    input.previousMaxScrollTop! - input.previousScrollTop! <= BOTTOM_SCROLL_EPSILON_PX &&
+    input.currentScrollTop >= input.previousScrollTop! - 0.5;
+  const previousPendingAtBottom =
+    hasPrevious &&
+    Boolean(input.holdingPendingBottom) &&
+    Number.isFinite(input.previousCompensatedScrollTop) &&
+    input.previousMaxScrollTop! - input.previousCompensatedScrollTop! <= BOTTOM_SCROLL_EPSILON_PX &&
+    input.currentScrollTop >= input.previousScrollTop! - 0.5;
+  const wasFollowing =
+    hasPrevious &&
+    !userScrolledUp &&
+    (currentlyAtBottom || previousScrollAtBottom || previousPendingAtBottom);
+  const atBottom = !userScrolledUp && (currentlyAtBottom || wasFollowing);
+  return {
+    atBottom,
+    wasFollowing,
+    userScrolledUp,
+  };
+}
+
 export function resolveFollowOutputScroll(input: {
   wasFollowing: boolean;
   currentScrollTop: number;
@@ -114,16 +163,27 @@ export function resolveFollowOutputScroll(input: {
     0,
     Math.min(effectivePreviousMaxScrollTop, input.previousCompensatedScrollTop - viewportAdjust),
   );
+  const scrolledUp =
+    input.currentScrollTop < input.previousScrollTop - 0.5 &&
+    input.maxScrollTop - input.currentScrollTop > 1;
+  const previouslyAtBottom =
+    input.previousMaxScrollTop - input.previousScrollTop <= BOTTOM_SCROLL_EPSILON_PX ||
+    effectivePreviousMaxScrollTop - input.previousScrollTop <= BOTTOM_SCROLL_EPSILON_PX ||
+    effectivePreviousMaxScrollTop - effectivePreviousCompensatedScrollTop <= BOTTOM_SCROLL_EPSILON_PX;
+  const canFollow = input.wasFollowing && !scrolledUp && previouslyAtBottom;
   const heightGrewBeforeScroll =
+    canFollow &&
     input.maxScrollTop > effectivePreviousMaxScrollTop + 0.5 &&
     input.currentScrollTop <=
       Math.max(input.previousCompensatedScrollTop, effectivePreviousCompensatedScrollTop) + 0.5 &&
     input.currentScrollTop < input.maxScrollTop - 0.5;
   const holdingPendingBottom =
+    canFollow &&
+    effectivePreviousMaxScrollTop - effectivePreviousCompensatedScrollTop <= BOTTOM_SCROLL_EPSILON_PX &&
     effectivePreviousCompensatedScrollTop > input.currentScrollTop + 0.5 &&
     input.currentScrollTop >= input.previousScrollTop - 0.5 &&
     input.maxScrollTop >= effectivePreviousCompensatedScrollTop - 0.5;
-  const anticipatesBottom = input.wasFollowing && (heightGrewBeforeScroll || holdingPendingBottom);
+  const anticipatesBottom = heightGrewBeforeScroll || holdingPendingBottom;
   const compensatedScrollTop = anticipatesBottom ? input.maxScrollTop : input.currentScrollTop;
   const scrollBaseline = anticipatesBottom
     ? Math.max(effectivePreviousMaxScrollTop, effectivePreviousCompensatedScrollTop)
@@ -131,7 +191,7 @@ export function resolveFollowOutputScroll(input: {
   return {
     anticipatesBottom,
     compensatedScrollTop,
-    scrollDistance: input.wasFollowing ? Math.max(0, compensatedScrollTop - scrollBaseline) : 0,
+    scrollDistance: canFollow ? Math.max(0, compensatedScrollTop - scrollBaseline) : 0,
     viewportHeightChangedOnly: false,
   };
 }

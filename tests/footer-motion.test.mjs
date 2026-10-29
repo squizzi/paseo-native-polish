@@ -4,6 +4,7 @@ import {
   USER_MESSAGE_AFTER_FOOTER_SLIDE_DELAY_MS,
   WORKED_FOOTER_ENTRANCE_DURATION_MS,
   WORKED_FOOTER_TEXT_BLUR_PX,
+  isFollowingScrollBottom,
   resolveFollowOutputScroll,
   resolveUserMessageEntranceDelayMs,
   shouldAnimateFooterRise,
@@ -299,5 +300,105 @@ test("long user message sent while composer resets eases the full new content sc
     compensatedScrollTop: 300,
     scrollDistance: 0,
     viewportHeightChangedOnly: false,
+  });
+});
+
+test("scrolling up while text is streaming disengages scroll easing until returning to the bottom", () => {
+  // User scrolls up slightly (e.g. 40px above bottom, well within the old 180px window)
+  const scrolledUpStep = isFollowingScrollBottom({
+    currentScrollTop: 960,
+    maxScrollTop: 1000,
+    previousScrollTop: 1000,
+    previousCompensatedScrollTop: 1000,
+    previousMaxScrollTop: 1000,
+    userScrolledUp: false,
+    holdingPendingBottom: false,
+  });
+  assert.deepEqual(scrolledUpStep, {
+    atBottom: false,
+    wasFollowing: false,
+    userScrolledUp: true,
+  });
+
+  // Next streaming line arrives while user remains at 960
+  const streamingWhileScrolledUp = isFollowingScrollBottom({
+    currentScrollTop: 960,
+    maxScrollTop: 1028,
+    previousScrollTop: 960,
+    previousCompensatedScrollTop: 960,
+    previousMaxScrollTop: 1000,
+    userScrolledUp: scrolledUpStep.userScrolledUp,
+    holdingPendingBottom: false,
+  });
+  assert.deepEqual(streamingWhileScrolledUp, {
+    atBottom: false,
+    wasFollowing: false,
+    userScrolledUp: true,
+  });
+
+  // Even if resolveFollowOutputScroll is called when scrolled up or mid-scroll-up, it must not jump
+  assert.deepEqual(
+    resolveFollowOutputScroll({
+      wasFollowing: true,
+      currentScrollTop: 960,
+      maxScrollTop: 1028,
+      previousScrollTop: 960,
+      previousCompensatedScrollTop: 960,
+      previousMaxScrollTop: 1000,
+    }),
+    {
+      anticipatesBottom: false,
+      compensatedScrollTop: 960,
+      scrollDistance: 0,
+      viewportHeightChangedOnly: false,
+    },
+  );
+  assert.deepEqual(
+    resolveFollowOutputScroll({
+      wasFollowing: true,
+      currentScrollTop: 960,
+      maxScrollTop: 1028,
+      previousScrollTop: 1000,
+      previousCompensatedScrollTop: 1000,
+      previousMaxScrollTop: 1000,
+    }),
+    {
+      anticipatesBottom: false,
+      compensatedScrollTop: 960,
+      scrollDistance: 0,
+      viewportHeightChangedOnly: false,
+    },
+  );
+
+  // Even a tiny 4px upward scroll disengages follow-output until the user returns to the exact bottom
+  const tinyScrollUp = isFollowingScrollBottom({
+    currentScrollTop: 996,
+    maxScrollTop: 1000,
+    previousScrollTop: 1000,
+    previousCompensatedScrollTop: 1000,
+    previousMaxScrollTop: 1000,
+    userScrolledUp: false,
+    holdingPendingBottom: false,
+  });
+  assert.deepEqual(tinyScrollUp, {
+    atBottom: false,
+    wasFollowing: false,
+    userScrolledUp: true,
+  });
+
+  // Returning to the bottom re-engages follow-output scroll easing
+  const returnedToBottom = isFollowingScrollBottom({
+    currentScrollTop: 1028,
+    maxScrollTop: 1028,
+    previousScrollTop: 960,
+    previousCompensatedScrollTop: 960,
+    previousMaxScrollTop: 1028,
+    userScrolledUp: streamingWhileScrolledUp.userScrolledUp,
+    holdingPendingBottom: false,
+  });
+  assert.deepEqual(returnedToBottom, {
+    atBottom: true,
+    wasFollowing: true,
+    userScrolledUp: false,
   });
 });
