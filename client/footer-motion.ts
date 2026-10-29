@@ -120,15 +120,18 @@ export function resolveFollowOutputScroll(input: {
       Math.max(input.previousCompensatedScrollTop, effectivePreviousCompensatedScrollTop) + 0.5 &&
     input.currentScrollTop < input.maxScrollTop - 0.5;
   const holdingPendingBottom =
-    input.previousCompensatedScrollTop > input.previousScrollTop + 0.5 &&
-    input.currentScrollTop <= input.previousScrollTop + 0.5 &&
+    effectivePreviousCompensatedScrollTop > input.currentScrollTop + 0.5 &&
+    input.currentScrollTop >= input.previousScrollTop - 0.5 &&
     input.maxScrollTop >= effectivePreviousCompensatedScrollTop - 0.5;
   const anticipatesBottom = input.wasFollowing && (heightGrewBeforeScroll || holdingPendingBottom);
   const compensatedScrollTop = anticipatesBottom ? input.maxScrollTop : input.currentScrollTop;
+  const scrollBaseline = anticipatesBottom
+    ? Math.max(effectivePreviousMaxScrollTop, effectivePreviousCompensatedScrollTop)
+    : effectivePreviousCompensatedScrollTop;
   return {
     anticipatesBottom,
     compensatedScrollTop,
-    scrollDistance: compensatedScrollTop - effectivePreviousCompensatedScrollTop,
+    scrollDistance: input.wasFollowing ? Math.max(0, compensatedScrollTop - scrollBaseline) : 0,
     viewportHeightChangedOnly: false,
   };
 }

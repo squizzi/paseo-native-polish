@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { shouldQueueMessageEntrance } from "../client/message-entry-motion.ts";
+import { messageEntranceMotion, shouldQueueMessageEntrance } from "../client/message-entry-motion.ts";
 
 const base = {
   hasPreviousChatState: true,
@@ -11,6 +11,24 @@ const base = {
   atBottom: true,
   quiet: false,
 };
+
+test("non-bubble chat items rise without a scale", () => {
+  const motion = messageEntranceMotion(false);
+  assert.equal(motion.styles, null);
+  assert.deepEqual(motion.keyframes, [
+    { opacity: 0, transform: "translateY(6px)" },
+    { opacity: 1, transform: "translateY(0)" },
+  ]);
+});
+
+test("the user message bubble keeps its scaled entrance", () => {
+  const motion = messageEntranceMotion(true);
+  assert.deepEqual(motion.styles, { "transform-origin": "100% 0%" });
+  assert.deepEqual(motion.keyframes, [
+    { opacity: 0, transform: "translateY(6px) scale(.98)" },
+    { opacity: 1, transform: "translateY(0) scale(1)" },
+  ]);
+});
 
 test("a new live message queues an entrance when row and Working commit together", () => {
   assert.equal(shouldQueueMessageEntrance({ ...base, running: true, isNew: true }), true);

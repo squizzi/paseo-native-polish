@@ -262,4 +262,42 @@ test("long user message sent while composer resets eases the full new content sc
     scrollDistance: 260,
     viewportHeightChangedOnly: false,
   });
+
+  const partialHostScrollStep = resolveFollowOutputScroll({
+    wasFollowing: true,
+    currentScrollTop: 1120,
+    maxScrollTop: 1260,
+    previousScrollTop: 1048,
+    previousCompensatedScrollTop: 1260,
+    previousMaxScrollTop: 1260,
+    currentScrollHeight: 1860,
+    previousScrollHeight: 1860,
+    currentClientHeight: 600,
+    previousClientHeight: 600,
+  });
+  assert.deepEqual(partialHostScrollStep, {
+    anticipatesBottom: true,
+    compensatedScrollTop: 1260,
+    scrollDistance: 0,
+    viewportHeightChangedOnly: false,
+  });
+
+  const scrolledUpSend = resolveFollowOutputScroll({
+    wasFollowing: false,
+    currentScrollTop: 300,
+    maxScrollTop: 1260,
+    previousScrollTop: 300,
+    previousCompensatedScrollTop: 300,
+    previousMaxScrollTop: 1200,
+    currentScrollHeight: 1860,
+    previousScrollHeight: 1800,
+    currentClientHeight: 600,
+    previousClientHeight: 600,
+  });
+  assert.deepEqual(scrolledUpSend, {
+    anticipatesBottom: false,
+    compensatedScrollTop: 300,
+    scrollDistance: 0,
+    viewportHeightChangedOnly: false,
+  });
 });

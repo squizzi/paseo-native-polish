@@ -30,7 +30,7 @@ import {
   type ToolDetailShimmerState,
   type ToolLabelState,
 } from "./tool-detail-motion";
-import { shouldQueueMessageEntrance } from "./message-entry-motion";
+import { messageEntranceMotion, shouldQueueMessageEntrance } from "./message-entry-motion";
 import {
   chatDisclosureMotion,
   resolveChatBubbleExpandedState,
@@ -882,6 +882,7 @@ function installWebMotion(): () => void {
             beforeToggleMarginTop: before.toggleMarginTop,
             currentToggleMarginTop,
           });
+          const finishChatHeight = beginChatHeightAnimation(before.chat ?? el.closest(CHAT), el);
           const restoreBubble = motion.bubbleKeyframes ? temporaryStyles(el, motion.bubbleStyles) : null;
           const restorePreview = temporaryStyles(preview, motion.styles, motion.priority);
           if (motion.bubbleKeyframes) {
@@ -889,17 +890,20 @@ function installWebMotion(): () => void {
               restoreBubble?.();
               active.get(preview)?.();
               if (toggle) active.get(toggle)?.();
+              finishChatHeight();
             });
           } else {
             const stopBubble = () => {
               active.get(preview)?.();
               if (toggle) active.get(toggle)?.();
+              finishChatHeight();
             };
             active.set(el, stopBubble);
           }
           animate(preview, motion.keyframes, () => {
             if (!motion.bubbleKeyframes) active.delete(el);
             restorePreview();
+            finishChatHeight();
           });
           if (toggle && motion.toggleKeyframes) {
             animate(toggle, motion.toggleKeyframes);
@@ -916,8 +920,12 @@ function installWebMotion(): () => void {
       return;
     }
 
+    const finishChatHeight = beginChatHeightAnimation(before.chat ?? el.closest(CHAT), el);
     const restore = temporaryStyles(el, { overflow: 'hidden', 'box-sizing': 'border-box', 'min-height': '0' });
-    animate(el, [{ height: `${before.height}px` }, { height: `${height}px` }], restore);
+    animate(el, [{ height: `${before.height}px` }, { height: `${height}px` }], () => {
+      restore();
+      finishChatHeight();
+    });
     if (height > before.height) {
       for (const detail of children.slice(1)) {
         if (before.children.includes(detail)) continue;
@@ -1031,6 +1039,7 @@ function installWebMotion(): () => void {
   const chats = new WeakMap<Element, ChatState>();
   const seenWorkedFooterNodes = new WeakSet<Element>();
   const chatDisclosureQuietUntil = new WeakMap<Element, number>();
+  const chatHeightAnimations = new WeakMap<Element, Set<Element>>();
   const timelineRises = new WeakMap<Element, ContentRise>();
   const footerRises = new WeakMap<Element, ContentRise>();
   const toolDetailRises = new WeakMap<Element, ContentRise>();
@@ -2036,11 +2045,35 @@ function installWebMotion(): () => void {
     let offset = 0;
     let animationFrame = 0;
     let lastFrameTime: number | null = null;
+    let restoreParentClip: (() => void) | null = null;
+    const isTimeline = element.matches(CHAT_TIMELINE);
     const applyOffset = (next: number) => {
       offset = next;
-      if (!element.isConnected) return;
-      if (next === 0) element.style.removeProperty('transform');
-      else element.style.setProperty('transform', `translateY(${next}px)`);
+      if (!element.isConnected) {
+        restoreParentClip?.();
+        restoreParentClip = null;
+        return;
+      }
+      if (next === 0) {
+        element.style.removeProperty('transform');
+        restoreParentClip?.();
+        restoreParentClip = null;
+      } else {
+        if (isTimeline && !restoreParentClip && element.parentElement) {
+          const parent = element.parentElement;
+          const parentStyle = window.getComputedStyle(parent);
+          const overflowY = (parentStyle.getPropertyValue('overflow-y') || parentStyle.getPropertyValue('overflow')).trim();
+          if (!/^(hidden|clip|auto|scroll)$/.test(overflowY)) {
+            restoreParentClip = temporaryStyles(parent, { 'overflow-y': 'clip' });
+          }
+        }
+        element.style.setProperty('transform', `translateY(${next}px)`);
+      }
+      if (toolDetailReveals.size > 0) {
+        for (const reveal of Array.from(toolDetailReveals)) {
+          if (!syncToolDetailReveal(reveal)) active.get(reveal.tintLayer)?.();
+        }
+      }
     };
     const step = (timestamp: number) => {
       const delta = lastFrameTime === null ? 0 : timestamp - lastFrameTime;
@@ -2066,13 +2099,14 @@ function installWebMotion(): () => void {
       prepare(distance) {
         if (Math.abs(distance) <= .5 || !canAnimate() || !getPreferences().messages) return;
         // The host follow-output frame is already queued when the mutation is
-        // observed. Hold the inverse intact through that frame, then begin the
-        // same decay core would start immediately after writing scrollTop.
-        if (animationFrame) window.cancelAnimationFrame(animationFrame);
-        animationFrame = 0;
-        lastFrameTime = null;
+        // observed. Hold the inverse intact through that frame when starting
+        // from rest, or accumulate onto the already-running decay without
+        // resetting lastFrameTime so back-to-back stream chunks never freeze.
         applyOffset(offset + distance);
-        animationFrame = window.requestAnimationFrame(step);
+        if (!animationFrame) {
+          lastFrameTime = null;
+          animationFrame = window.requestAnimationFrame(step);
+        }
       },
       cancel() {
         if (animationFrame) window.cancelAnimationFrame(animationFrame);
@@ -2149,8 +2183,44 @@ function installWebMotion(): () => void {
       (child.textContent?.trim() ?? '').startsWith(prefix),
     )) ?? null;
   }
+  function beginChatHeightAnimation(chat: Element | null, element: Element, durationMs = duration()): () => void {
+    if (!chat) return () => {};
+    let set = chatHeightAnimations.get(chat);
+    if (!set) {
+      set = new Set();
+      chatHeightAnimations.set(chat, set);
+    }
+    set.add(element);
+    chatDisclosureQuietUntil.set(
+      chat,
+      Math.max(chatDisclosureQuietUntil.get(chat) ?? 0, Date.now() + durationMs + 60),
+    );
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      set?.delete(element);
+      const state = chats.get(chat);
+      if ((!set || set.size === 0) && chat.isConnected) {
+        chatDisclosureQuietUntil.delete(chat);
+        if (state) {
+          const footer = footerFor(chat);
+          const footerRise = footer ? riseFor(footerRises, footer) : null;
+          state.scrollTop = chat.scrollTop;
+          state.compensatedScrollTop = chat.scrollTop;
+          state.maxScrollTop = Math.max(0, chat.scrollHeight - chat.clientHeight);
+          state.scrollHeight = chat.scrollHeight;
+          state.clientHeight = chat.clientHeight;
+          state.footer = footer;
+          state.footerTop = footer ? rect(footer).top - (footerRise?.getOffset() ?? 0) : null;
+        }
+      }
+    };
+  }
   function findToolDetailScrollBox(owner: Element): Element | null {
+    const ownerTool = owner.closest(TOOL);
     for (const candidate of [owner, ...all(owner, '*')]) {
+      if (ownerTool && candidate.closest(TOOL) !== ownerTool) continue;
       const style = window.getComputedStyle(candidate);
       const overflowY = (style.getPropertyValue('overflow-y') || style.getPropertyValue('overflow')).trim();
       const maxHeight = parseFloat(style.getPropertyValue('max-height'));
@@ -2275,16 +2345,17 @@ function installWebMotion(): () => void {
     const next = new Map<Element, ToolDetailTextState>();
     const targets: Array<{ detail: Element; owner: Element; isToolDetail: boolean; isStreaming: boolean; allowTextReveal: boolean }> = [];
     for (const tool of live(TOOL).slice(-80)) {
+      if (tool.matches('[data-testid="tool-call-group"]')) continue;
       const header = firstBoxChild(tool);
       const isStreaming = Boolean(header && all(header, '[style*="--paseo-shimmer"],[data-native-polish-shimmer-overlay]').length > 0);
-      const allowTextReveal = !tool.matches('[data-testid="tool-call-group"]');
       for (const detail of Array.from(tool.children).slice(1)) {
+        if (detail.matches(TOOL) || detail.querySelector(TOOL)) continue;
         targets.push({
           detail,
           owner: firstBoxChild(detail) ?? detail,
           isToolDetail: true,
           isStreaming,
-          allowTextReveal,
+          allowTextReveal: true,
         });
       }
     }
@@ -2308,16 +2379,19 @@ function installWebMotion(): () => void {
       const manualDisclosure = pending?.disclosure?.element === detail.closest(TOOL);
 
       let committedHeight = layout.naturalHeight;
-      if (isToolDetail && previous && canAnimateDetail && !manualDisclosure) {
+      if (isToolDetail && previous && text !== previous.text && canAnimateDetail && !manualDisclosure) {
         const heightTransition = toolDetailHeightTransition({
           previousHeight: previous.committedHeight,
           currentHeight: layout.naturalHeight,
           inFlightHeight: previous.box === layout.box ? layout.inFlightHeight : null,
         });
         if (heightTransition) {
-          if (detailChat) chatDisclosureQuietUntil.set(detailChat, Date.now() + duration() + 60);
+          const finishChatHeight = beginChatHeightAnimation(detailChat, layout.box);
           const restore = temporaryStyles(layout.box, heightTransition.styles);
-          animate(layout.box, heightTransition.keyframes, restore, 0, duration());
+          animate(layout.box, heightTransition.keyframes, () => {
+            restore();
+            finishChatHeight();
+          }, 0, duration());
         } else if (layout.inFlightHeight !== null && Math.abs(layout.naturalHeight - previous.committedHeight) < 2) {
           committedHeight = previous.committedHeight;
         }
@@ -2398,6 +2472,11 @@ function installWebMotion(): () => void {
       animate(tintLayer, transition.cover, () => {
         root.remove(); ghosts.delete(root); toolDetailReveals.delete(reveal);
       }, 0, transition.durationMs);
+    }
+    for (const [detail, state] of toolDetailText) {
+      if (!next.has(detail) && detail.isConnected) {
+        next.set(detail, state);
+      }
     }
     toolDetailText = next;
   }
@@ -2557,7 +2636,14 @@ function installWebMotion(): () => void {
         old.hydrationQuietUntil = Date.now() + 500;
         old.reflowQuietUntil = 0;
       } else if (old && old.seen.size === 0 && rows.length > 0) {
-        old.hydrationQuietUntil = Date.now() + 500;
+        const isFirstLiveUserTurn =
+          allow &&
+          rows.length <= 2 &&
+          Boolean(rows[0]?.querySelector(USER_MESSAGE)) &&
+          !rows.some((row) => Boolean(row.querySelector('[data-testid="assistant-message"]')));
+        if (!isFirstLiveUserTurn) {
+          old.hydrationQuietUntil = Date.now() + 500;
+        }
       }
     }
     animateGrowingToolText(allow);
@@ -2571,25 +2657,45 @@ function installWebMotion(): () => void {
       const seenWorkedFooters = old?.seenWorkedFooters ?? new Set<string>();
       const candidates = allow ? old?.pending ?? new Set<string>() : new Set<string>();
       const firstHistoryPopulation = Boolean(!old || (old.seen.size === 0 && rows.length > 0));
-      const hydrationQuietUntil = firstHistoryPopulation
-        ? Math.max(old?.hydrationQuietUntil ?? 0, Date.now() + 500)
-        : old?.hydrationQuietUntil ?? 0;
+      const isFirstLiveUserTurn = Boolean(
+        allow &&
+          firstHistoryPopulation &&
+          rows.length >= 1 &&
+          rows.length <= 2 &&
+          rows[0]?.querySelector(USER_MESSAGE) &&
+          !rows.some((row) => Boolean(row.querySelector('[data-testid="assistant-message"]'))),
+      );
+      const hydrationQuietUntil =
+        firstHistoryPopulation && !isFirstLiveUserTurn
+          ? Math.max(old?.hydrationQuietUntil ?? 0, Date.now() + 500)
+          : isFirstLiveUserTurn
+            ? 0
+            : old?.hydrationQuietUntil ?? 0;
       const suppressHydrationMotion = Date.now() < hydrationQuietUntil;
       const liveTurn = running || Boolean(old?.running);
+      const hasEnteringUserMessage = Boolean(
+        (old || isFirstLiveUserTurn) &&
+          !suppressHydrationMotion &&
+          rows.some((row) => {
+            const id = row.getAttribute('data-history-row-id') ?? '';
+            return Boolean(id && !seen.has(id) && row.querySelector(USER_MESSAGE));
+          }),
+      );
+      if (hasEnteringUserMessage) {
+        const heightAnimated = chatHeightAnimations.get(chat);
+        if (heightAnimated?.size) {
+          for (const animatedEl of Array.from(heightAnimated)) {
+            active.get(animatedEl)?.();
+          }
+          heightAnimated.clear();
+        }
+      }
       const currentScrollTop = chat.scrollTop;
       const currentScrollHeight = chat.scrollHeight;
       const currentClientHeight = chat.clientHeight;
       const maxScrollTop = Math.max(0, currentScrollHeight - currentClientHeight);
       const wasFollowing = Boolean(
         old && (old.maxScrollTop - old.scrollTop < 180 || old.maxScrollTop - old.compensatedScrollTop < 180),
-      );
-      const hasEnteringUserMessage = Boolean(
-        old &&
-          !suppressHydrationMotion &&
-          rows.some((row) => {
-            const id = row.getAttribute('data-history-row-id') ?? '';
-            return Boolean(id && !seen.has(id) && row.querySelector(USER_MESSAGE));
-          }),
       );
       const atBottom =
         maxScrollTop - currentScrollTop < 180 || wasFollowing || hasEnteringUserMessage;
@@ -2614,8 +2720,9 @@ function installWebMotion(): () => void {
         ?? nativeAssistantRows.filter((row) => !seen.has(row.getAttribute('data-history-row-id') ?? ''))
           .sort((left, right) => Math.abs(rows.indexOf(left) - pendingHandoff.index) - Math.abs(rows.indexOf(right) - pendingHandoff.index))[0]
         ?? null : null;
+      const handoffSwapCommit = Boolean(!stream && (old?.stream || handoffRow));
       const handoffTransition = Boolean(!stream && (old?.stream || old?.handoff || handoffRow));
-      let handoffQuietUntil = handoffTransition ? Date.now() + 500 : old?.handoffQuietUntil ?? 0;
+      let handoffQuietUntil = handoffSwapCommit ? Date.now() + 180 : old?.handoffQuietUntil ?? 0;
       if (handoffRow) handoff = null;
       const enteringCompactions = new Set<Element>();
       for (const item of all(chat, '[data-testid="stream-item"]')) {
@@ -2655,7 +2762,7 @@ function installWebMotion(): () => void {
         seen.add(id);
         if (row === handoffRow) candidates.delete(id);
         else if (shouldQueueMessageEntrance({
-          hasPreviousChatState: Boolean(old),
+          hasPreviousChatState: Boolean(old) || isFirstLiveUserTurn,
           wasRunning: Boolean(old?.running),
           running,
           isUserMessage,
@@ -2682,11 +2789,8 @@ function installWebMotion(): () => void {
       if (allow && getPreferences().messages && atBottom && Date.now() >= quietUntil) {
         for (const item of enteringCompactions) {
           if (!visible(item) || active.has(item)) continue;
-          const restore = temporaryStyles(item, { 'transform-origin': '0% 100%' });
-          animate(item, [
-            { opacity: 0, transform: 'translateY(6px) scale(.98)' },
-            { opacity: 1, transform: 'translateY(0) scale(1)' },
-          ], restore, 0, 260);
+          const motion = messageEntranceMotion(false);
+          animate(item, motion.keyframes, undefined, 0, 260);
         }
       }
       for (const stream of all(chat, '[data-testid="native-polish-streaming-assistant"]')) {
@@ -2723,9 +2827,12 @@ function installWebMotion(): () => void {
             expandLayout,
           });
           if (motion.rowStyles && motion.rowKeyframes && !active.has(workedFooter.row)) {
-            chatDisclosureQuietUntil.set(chat, Date.now() + motion.durationMs + 60);
+            const finishWorkedFooterHeight = beginChatHeightAnimation(chat, workedFooter.row, motion.durationMs);
             const restoreRow = temporaryStyles(workedFooter.row, motion.rowStyles);
-            animate(workedFooter.row, motion.rowKeyframes, restoreRow, 0, motion.durationMs);
+            animate(workedFooter.row, motion.rowKeyframes, () => {
+              restoreRow();
+              finishWorkedFooterHeight();
+            }, 0, motion.durationMs);
           }
           if (visible(workedFooter.label) && !active.has(workedFooter.label)) {
             animate(workedFooter.label, motion.textKeyframes, undefined, 0, motion.durationMs);
@@ -2749,12 +2856,13 @@ function installWebMotion(): () => void {
       // alive through the trailing host scroll event.
       const reflowQuietUntil = widthChanged ? Date.now() + 120 : old?.reflowQuietUntil ?? 0;
       const suppressWidthReflowMotion = Date.now() < reflowQuietUntil;
-      const suppressDisclosureMotion = Date.now() < (chatDisclosureQuietUntil.get(chat) ?? 0);
+      const suppressDisclosureMotion =
+        Date.now() < (chatDisclosureQuietUntil.get(chat) ?? 0) ||
+        Boolean(chatHeightAnimations.get(chat)?.size);
       const measuredFooterTop = footer && footerRise ? rect(footer).top - footerRise.getOffset() : null;
       const canRiseWithFollowOutput = old && allow && atBottom && getPreferences().messages && Date.now() >= quietUntil && !suppressHandoffMotion && !suppressHydrationMotion && !suppressWidthReflowMotion && !suppressDisclosureMotion;
       let compensatedScrollTop = currentScrollTop;
       let footerTop = measuredFooterTop;
-      let followScrollDistance = 0;
       if (canRiseWithFollowOutput) {
         // A chat mutation is observable before Paseo's follow-output frame.
         // Pre-arm the inverse from the new scroll extent so the subsequent
@@ -2764,7 +2872,7 @@ function installWebMotion(): () => void {
         // previous snap yet; the compensated target is the authoritative
         // follow position across back-to-back stream chunks.
         const followScroll = resolveFollowOutputScroll({
-          wasFollowing: wasFollowing || hasEnteringUserMessage,
+          wasFollowing,
           currentScrollTop,
           maxScrollTop,
           previousScrollTop: old.scrollTop,
@@ -2776,7 +2884,6 @@ function installWebMotion(): () => void {
           previousClientHeight: old.clientHeight,
         });
         compensatedScrollTop = followScroll.compensatedScrollTop;
-        followScrollDistance = followScroll.scrollDistance;
         if (followScroll.viewportHeightChangedOnly) {
           if (currentClientHeight < old.clientHeight - 0.5 || (timelineRise?.getOffset() ?? 0) <= 0.5) {
             timelineRise?.cancel();
@@ -2790,8 +2897,10 @@ function installWebMotion(): () => void {
           // layout movement. Before overflow, retain the ordinary footer rise.
           if (measuredFooterTop !== null) footerTop = measuredFooterTop - (compensatedScrollTop - currentScrollTop);
           if (
+            old.maxScrollTop <= 0.5 &&
             old.footerTop !== null &&
             footerTop !== null &&
+            old.footerTop - footerTop < -0.5 &&
             shouldAnimateFooterRise(old.footer, footer, hasEnteringUserMessage)
           ) {
             footerRise?.start(old.footerTop - footerTop);
@@ -2808,20 +2917,16 @@ function installWebMotion(): () => void {
         old?.footerTop !== null && old?.footerTop !== undefined && footerTop !== null
           ? footerTop - old.footerTop
           : 0;
-      const footerSlideDownPx = Math.max(
-        footerMovedDownPx,
-        (footer || old?.footer) && hasEnteringUserMessage ? followScrollDistance : 0,
-      );
+      const footerSlideDownPx =
+        old && old.maxScrollTop <= 0.5 ? Math.max(0, footerMovedDownPx) : 0;
       for (const { row, isUserMessage } of pendingRowEntrances) {
         const delayMs = resolveUserMessageEntranceDelayMs({
           isUserMessage,
           footerSlideDownPx,
         });
-        const restore = temporaryStyles(row, { 'transform-origin': isUserMessage ? '100% 0%' : '0% 100%' });
-        animate(row, [
-          { opacity: 0, transform: 'translateY(6px) scale(.98)' },
-          { opacity: 1, transform: 'translateY(0) scale(1)' },
-        ], restore, delayMs, 320);
+        const motion = messageEntranceMotion(isUserMessage);
+        const restore = motion.styles ? temporaryStyles(row, motion.styles) : undefined;
+        animate(row, motion.keyframes, restore, delayMs, 320);
       }
       if (allow && getPreferences().states && old && old.running !== running && atBottom && !suppressHandoffMotion && !suppressHydrationMotion) {
         // A disappearing indicator has no incoming element to animate. Do not
@@ -3255,6 +3360,7 @@ function installWebMotion(): () => void {
   const observer = new MutationObserver(records => {
     if (disposed || suspended) return;
     let shellChanged = false;
+    let refreshChatNow = false;
     for (const record of records) {
       const target = elementOf(record.target);
       const structural = record.type === 'childList';
@@ -3293,14 +3399,7 @@ function installWebMotion(): () => void {
       const meaningful = structural || record.type === 'characterData' || ['aria-expanded', 'aria-selected', 'aria-busy'].includes(record.attributeName ?? '');
       if (target.closest(CHAT)) {
         if (meaningful || textual) {
-          if (pending?.disclosure && canAnimate()) {
-            if (frame) { window.cancelAnimationFrame(frame); frame = 0; }
-            flush();
-          }
-          // Follow-output is scheduled from the same chat commit. Measure its
-          // new extent in this microtask so the inverse is ready before the
-          // host's animation frame writes scrollTop.
-          refreshAmbient(canAnimate(), new Set<Region>(['tools', 'messages']));
+          refreshChatNow = true;
         }
       } else if (target.closest(WORKSPACE_SCROLL)) {
         if (meaningful) {
@@ -3333,6 +3432,16 @@ function installWebMotion(): () => void {
         window.cancelAnimationFrame(frame);
         flush();
       }
+    }
+    if (refreshChatNow) {
+      if (pending?.disclosure && canAnimate()) {
+        if (frame) { window.cancelAnimationFrame(frame); frame = 0; }
+        flush();
+      }
+      // Follow-output is scheduled from the same chat commit. Measure its
+      // new extent once in this microtask so the inverse is ready before the
+      // host's animation frame writes scrollTop.
+      refreshAmbient(canAnimate(), new Set<Region>(['tools', 'messages']));
     }
   });
   observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['style', 'class', 'role', 'aria-hidden', 'aria-expanded', 'aria-selected', 'aria-busy', 'data-status-bucket'] });
