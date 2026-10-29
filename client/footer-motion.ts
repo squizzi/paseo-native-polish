@@ -1,9 +1,13 @@
 export type FooterMotionFrame = Record<string, string | number>;
 
 export const WORKED_FOOTER_ENTRANCE_DURATION_MS = 320;
-export const WORKED_FOOTER_TEXT_BLUR_PX = 4;
 export const USER_MESSAGE_AFTER_FOOTER_SLIDE_DELAY_MS = 140;
 export const BOTTOM_SCROLL_EPSILON_PX = 8;
+
+const WORKED_FOOTER_RISE_KEYFRAMES: FooterMotionFrame[] = [
+  { opacity: 0, transform: "translateY(6px)" },
+  { opacity: 1, transform: "translateY(0)" },
+];
 
 export interface WorkedFooterEntranceMotion {
   durationMs: number;
@@ -34,13 +38,14 @@ export function resolveUserMessageEntranceDelayMs(input: {
 export function shouldQueueWorkedFooterEntrance(input: {
   hasPreviousChatState: boolean;
   liveTurn: boolean;
+  completedFooterPending?: boolean;
   suppressHydrationMotion: boolean;
   isNew: boolean;
   hasEnteringUserMessage?: boolean;
 }): boolean {
   if (
     !input.hasPreviousChatState ||
-    !input.liveTurn ||
+    (!input.liveTurn && !input.completedFooterPending) ||
     input.suppressHydrationMotion ||
     input.hasEnteringUserMessage ||
     !input.isNew
@@ -210,14 +215,8 @@ export function workedFooterEntranceMotion(input: {
   const shouldExpand = (input.expandLayout ?? true) && height > 1;
   return {
     durationMs: WORKED_FOOTER_ENTRANCE_DURATION_MS,
-    textKeyframes: [
-      { opacity: 0, filter: `blur(${WORKED_FOOTER_TEXT_BLUR_PX}px)`, transform: "translateY(4px)" },
-      { opacity: 1, filter: "blur(0px)", transform: "translateY(0)" },
-    ],
-    chromeKeyframes: [
-      { opacity: 0, transform: "translateY(4px)" },
-      { opacity: 1, transform: "translateY(0)" },
-    ],
+    textKeyframes: WORKED_FOOTER_RISE_KEYFRAMES,
+    chromeKeyframes: WORKED_FOOTER_RISE_KEYFRAMES,
     rowStyles: shouldExpand
       ? {
           overflow: "hidden",

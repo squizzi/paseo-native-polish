@@ -2763,6 +2763,7 @@ function installWebMotion(): () => void {
         if (shouldQueueWorkedFooterEntrance({
           hasPreviousChatState: Boolean(old),
           liveTurn,
+          completedFooterPending: Boolean(old && !running && Date.now() < old.completedFooterPendingUntil),
           suppressHydrationMotion,
           hasEnteringUserMessage,
           isNew: !alreadySeen,

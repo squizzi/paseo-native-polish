@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   USER_MESSAGE_AFTER_FOOTER_SLIDE_DELAY_MS,
   WORKED_FOOTER_ENTRANCE_DURATION_MS,
-  WORKED_FOOTER_TEXT_BLUR_PX,
   isFollowingScrollBottom,
   resolveFollowOutputScroll,
   resolveUserMessageEntranceDelayMs,
@@ -51,7 +50,7 @@ test("user message entrance waits for footerDetails slide-down before appearing"
   );
 });
 
-test("Worked footer entrance eases text in with opacity/blur and expands row layout to ease elements below down", () => {
+test("Worked footer entrance eases text in with the chat rise motion and expands row layout to ease elements below down", () => {
   const motion = workedFooterEntranceMotion({
     height: 56,
     marginTop: 13,
@@ -61,11 +60,11 @@ test("Worked footer entrance eases text in with opacity/blur and expands row lay
   assert.deepEqual(motion, {
     durationMs: WORKED_FOOTER_ENTRANCE_DURATION_MS,
     textKeyframes: [
-      { opacity: 0, filter: `blur(${WORKED_FOOTER_TEXT_BLUR_PX}px)`, transform: "translateY(4px)" },
-      { opacity: 1, filter: "blur(0px)", transform: "translateY(0)" },
+      { opacity: 0, transform: "translateY(6px)" },
+      { opacity: 1, transform: "translateY(0)" },
     ],
     chromeKeyframes: [
-      { opacity: 0, transform: "translateY(4px)" },
+      { opacity: 0, transform: "translateY(6px)" },
       { opacity: 1, transform: "translateY(0)" },
     ],
     rowStyles: {

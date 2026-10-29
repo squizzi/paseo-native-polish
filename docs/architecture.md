@@ -48,7 +48,7 @@ Tool-label and summary shimmers use a persistent plugin-owned overlay with a con
 
 Live streaming assistant rows and open Thinking/tool details keep the host as their only text paint owner. The adapter locates the appended DOM text range, covers only its glyph rectangles with the nearest painted panel background, then fades those inert covers away. Active covers follow programmatic chat scrolling and are removed when the reveal finishes or motion is interrupted, so prior text cannot flash, double or wrap differently from the live view.
 
-Live compaction markers own their stream-item entrance so the surrounding history row cannot double-animate them. `Worked for ...s` rows ease their label in with the same opacity/blur fade as streaming text and expand their layout slot only when live content follows below them; turn-completion footers, renderer handoffs and tab/workspace rehydrations keep their layout height stationary so scroll clamping cannot jump the timeline.
+Live compaction markers own their stream-item entrance so the surrounding history row cannot double-animate them. `Worked for ...s` rows ease their label and chrome in with the same upward rise as other arriving chat items and expand their layout slot only when live content follows below them; turn-completion footers, renderer handoffs and tab/workspace rehydrations keep their layout height stationary so scroll clamping cannot jump the timeline.
 
 Preferences use a small reactive store and client-local storage. Reduce Motion is observed live. Dragging, scrolling, preference changes and teardown cancel active animations. Cleanup removes temporary styles, inert copies, injected CSS, DOM markers, observers, timers and event listeners.
 
