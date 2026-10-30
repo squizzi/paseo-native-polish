@@ -236,3 +236,63 @@ export function workedFooterEntranceMotion(input: {
       : null,
   };
 }
+
+export function resolveStreamingAssistantGaps(input: {
+  aboveIsUserMessage: boolean;
+  aboveIsToolSequence: boolean;
+  aboveHasCompletedFooter: boolean;
+  belowExists: boolean;
+  belowIsToolSequence: boolean;
+  currentHasCompletedFooter: boolean;
+}): {
+  gapAbove: "user" | "tool" | null;
+  gapBelow: "default" | null;
+} {
+  const gapAbove = input.aboveHasCompletedFooter
+    ? null
+    : input.aboveIsUserMessage
+      ? "user"
+      : input.aboveIsToolSequence
+        ? "tool"
+        : null;
+  const gapBelow =
+    !input.belowExists || input.currentHasCompletedFooter || input.belowIsToolSequence
+      ? null
+      : "default";
+  return { gapAbove, gapBelow };
+}
+
+export function shouldAllowFollowOutputRise(input: {
+  hasPreviousChatState: boolean;
+  allow: boolean;
+  atBottom: boolean;
+  messagesEnabled: boolean;
+  quiet: boolean;
+  suppressHandoffMotion: boolean;
+  suppressHydrationMotion: boolean;
+  suppressWidthReflowMotion: boolean;
+  suppressDisclosureMotion: boolean;
+  hasEnteringUserMessage: boolean;
+  holdingPendingBottom: boolean;
+  hasActiveTimelineRise: boolean;
+  hasManualDisclosureCapture: boolean;
+}): boolean {
+  if (
+    !input.hasPreviousChatState ||
+    !input.allow ||
+    !input.atBottom ||
+    !input.messagesEnabled ||
+    input.quiet ||
+    input.suppressHandoffMotion ||
+    input.suppressHydrationMotion ||
+    input.suppressWidthReflowMotion
+  ) {
+    return false;
+  }
+  if (!input.suppressDisclosureMotion) return true;
+  return (
+    (input.hasEnteringUserMessage ||
+      (input.holdingPendingBottom && input.hasActiveTimelineRise)) &&
+    !input.hasManualDisclosureCapture
+  );
+}

@@ -5,7 +5,9 @@ import {
   WORKED_FOOTER_ENTRANCE_DURATION_MS,
   isFollowingScrollBottom,
   resolveFollowOutputScroll,
+  resolveStreamingAssistantGaps,
   resolveUserMessageEntranceDelayMs,
+  shouldAllowFollowOutputRise,
   shouldAnimateFooterRise,
   shouldExpandWorkedFooterLayout,
   shouldQueueWorkedFooterEntrance,
@@ -400,4 +402,123 @@ test("scrolling up while text is streaming disengages scroll easing until return
     wasFollowing: true,
     userScrolledUp: false,
   });
+});
+
+test("streaming assistant gap offsets match Paseo's compactBottom assistant spacing across handoff", () => {
+  // Trailing streaming assistant after a live tool/thought row:
+  // above has 16px plugin gap (offset by -12px -> 4px), below is end-of-timeline (0px compactBottom).
+  assert.deepEqual(
+    resolveStreamingAssistantGaps({
+      aboveIsUserMessage: false,
+      aboveIsToolSequence: true,
+      aboveHasCompletedFooter: false,
+      belowExists: false,
+      belowIsToolSequence: false,
+      currentHasCompletedFooter: false,
+    }),
+    {
+      gapAbove: "tool",
+      gapBelow: null,
+    },
+  );
+
+  // When the row above has an inline CompletedTurnFooterRow ("Worked for ..."),
+  // Paseo sets above's gapBelow to 0px for both plugin and assistant_message, so no negative margin is applied.
+  assert.deepEqual(
+    resolveStreamingAssistantGaps({
+      aboveIsUserMessage: false,
+      aboveIsToolSequence: true,
+      aboveHasCompletedFooter: true,
+      belowExists: false,
+      belowIsToolSequence: false,
+      currentHasCompletedFooter: false,
+    }),
+    {
+      gapAbove: null,
+      gapBelow: null,
+    },
+  );
+
+  // Mid-stream assistant followed by a tool/thought/todo row:
+  // 0px paddingBottom + 16px plugin gapBelow matches 12px default paddingBottom + 4px assistant gapBelow.
+  assert.deepEqual(
+    resolveStreamingAssistantGaps({
+      aboveIsUserMessage: true,
+      aboveIsToolSequence: false,
+      aboveHasCompletedFooter: false,
+      belowExists: true,
+      belowIsToolSequence: true,
+      currentHasCompletedFooter: false,
+    }),
+    {
+      gapAbove: "user",
+      gapBelow: null,
+    },
+  );
+
+  // Assistant row followed by a non-tool row without an inline completed footer restores 12px bottom padding.
+  assert.deepEqual(
+    resolveStreamingAssistantGaps({
+      aboveIsUserMessage: true,
+      aboveIsToolSequence: false,
+      aboveHasCompletedFooter: false,
+      belowExists: true,
+      belowIsToolSequence: false,
+      currentHasCompletedFooter: false,
+    }),
+    {
+      gapAbove: "user",
+      gapBelow: "default",
+    },
+  );
+});
+
+test("sending a user message while a Thinking panel height animation is active still allows follow-output rise", () => {
+  const base = {
+    hasPreviousChatState: true,
+    allow: true,
+    atBottom: true,
+    messagesEnabled: true,
+    quiet: false,
+    suppressHandoffMotion: false,
+    suppressHydrationMotion: false,
+    suppressWidthReflowMotion: false,
+    suppressDisclosureMotion: true,
+    hasEnteringUserMessage: false,
+    holdingPendingBottom: false,
+    hasActiveTimelineRise: false,
+    hasManualDisclosureCapture: false,
+  };
+
+  // Ordinary Thinking panel growth remains suppressed from triggering a whole-timeline rise
+  assert.equal(shouldAllowFollowOutputRise(base), false);
+
+  // Sending a user message while Thinking panel height animation is active prepares timeline rise
+  assert.equal(
+    shouldAllowFollowOutputRise({
+      ...base,
+      hasEnteringUserMessage: true,
+    }),
+    true,
+  );
+
+  // Subsequent frames while holding pending bottom and active timeline rise stay active until host scroll lands
+  assert.equal(
+    shouldAllowFollowOutputRise({
+      ...base,
+      holdingPendingBottom: true,
+      hasActiveTimelineRise: true,
+    }),
+    true,
+  );
+
+  // Manual user click on a disclosure never triggers timeline rise
+  assert.equal(
+    shouldAllowFollowOutputRise({
+      ...base,
+      hasEnteringUserMessage: true,
+      hasManualDisclosureCapture: true,
+    }),
+    false,
+  );
 });
