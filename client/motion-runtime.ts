@@ -14,7 +14,10 @@ export function leaseMotion(version: string, install: () => () => void): () => v
         const difference = candidate.version[index] - best.version[index];
         if (difference) return difference > 0 ? candidate : best;
       }
-      return best;
+      // A plugin reload evaluates a new client bundle without necessarily
+      // disconnecting the old one first.  Equal versions therefore mean the
+      // later lease is the freshly reloaded code and must take ownership.
+      return candidate;
     }, null);
     if (runtime.owner === next) return;
     runtime.dispose?.();

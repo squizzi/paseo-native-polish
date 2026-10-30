@@ -28,7 +28,7 @@
 
 ## 安装
 
-需要 **Paseo 0.11.2** 或更高版本，并在目标 daemon 启用插件。适配器基于 0.11.2 开发。
+需要 **Paseo 0.13.0** 或更高版本，并在目标 daemon 启用插件。
 
 ```sh
 paseo plugin add git:JasprW/paseo-native-polish

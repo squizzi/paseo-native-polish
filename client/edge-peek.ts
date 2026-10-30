@@ -38,6 +38,7 @@ const TRIGGER = 'data-native-polish-peek-trigger';
 const LEFT_TOGGLE = '[data-testid="menu-button"][aria-expanded]';
 const RIGHT_TOGGLE = '[data-testid="workspace-explorer-toggle"][aria-expanded]';
 const RIGHT_HANDLE = '[data-testid="workspace-explorer-sidebar-resize-handle"]';
+const RIGHT_HOST = '[id^="file-explorer-gesture-host-"]';
 const FLOATING = '[data-menu-surface="true"], [role="dialog"]';
 const INPUT = 'input,textarea,select,[contenteditable="true"],[role="textbox"]';
 const DELAY = 180;
@@ -63,9 +64,11 @@ export function installEdgePeek(options: {
   let settling = false;
   let current: { side: Side; toggle: Element; root: Element | null; closing: boolean; restoring: boolean; activated: boolean } | null = null;
   const css = document.createElement('style');
-  // The sibling selector applies during React's first mounting commit, before
+  // The host/sibling selectors apply during React's first mounting commit, before
   // ResizeObserver/onLayout or our MutationObserver can see the new dock.
-  const right = `body[${MARKER}="right"] ${RIGHT_HANDLE} + div`;
+  const right = `body[${MARKER}="right"] ${RIGHT_HOST}, body[${MARKER}="right"] ${RIGHT_HANDLE} + div`;
+  const rightOpening = `body[${MARKER}="right"][${PHASE}="opening"] [${OWNER}], body[${MARKER}="right"][${PHASE}="opening"] ${RIGHT_HOST}, body[${MARKER}="right"][${PHASE}="opening"] ${RIGHT_HANDLE} + div`;
+  const rightClosing = `body[${MARKER}="right"][${PHASE}="closing"] [${OWNER}], body[${MARKER}="right"][${PHASE}="closing"] ${RIGHT_HOST}, body[${MARKER}="right"][${PHASE}="closing"] ${RIGHT_HANDLE} + div`;
   const owners = `body[${MARKER}] [${OWNER}], ${right}`;
   css.textContent = `
     [${TRIGGER}] {
@@ -86,9 +89,9 @@ export function installEdgePeek(options: {
     body[${MARKER}="right"] ${RIGHT_HANDLE} { display: none !important; }
     body[${MARKER}] [${OWNER}] [data-testid="left-sidebar-resize-handle"] { pointer-events: none !important; }
     body[${MARKER}="left"][${PHASE}="opening"] [${OWNER}] { animation: native-polish-peek-left-in var(--native-polish-peek-time) cubic-bezier(.22,1,.36,1) both; }
-    body[${MARKER}="right"][${PHASE}="opening"] [${OWNER}], body[${MARKER}="right"][${PHASE}="opening"] ${RIGHT_HANDLE} + div { animation: native-polish-peek-right-in var(--native-polish-peek-time) cubic-bezier(.22,1,.36,1) both; }
+    ${rightOpening} { animation: native-polish-peek-right-in var(--native-polish-peek-time) cubic-bezier(.22,1,.36,1) both; }
     body[${MARKER}="left"][${PHASE}="closing"] [${OWNER}] { animation: native-polish-peek-left-out var(--native-polish-peek-time) cubic-bezier(.4,0,.8,.2) both; pointer-events: none !important; }
-    body[${MARKER}="right"][${PHASE}="closing"] [${OWNER}], body[${MARKER}="right"][${PHASE}="closing"] ${RIGHT_HANDLE} + div { animation: native-polish-peek-right-out var(--native-polish-peek-time) cubic-bezier(.4,0,.8,.2) both; pointer-events: none !important; }
+    ${rightClosing} { animation: native-polish-peek-right-out var(--native-polish-peek-time) cubic-bezier(.4,0,.8,.2) both; pointer-events: none !important; }
     @keyframes native-polish-peek-left-in { from { transform: translateX(calc(-100% - 16px)); } to { transform: translateX(0); } }
     @keyframes native-polish-peek-right-in { from { transform: translateX(calc(100% + 16px)); } to { transform: translateX(0); } }
     @keyframes native-polish-peek-left-out { from { transform: translateX(0); } to { transform: translateX(calc(-100% - 16px)); } }
@@ -112,6 +115,13 @@ export function installEdgePeek(options: {
   const available = () => !disposed && options.enabled() && fine.matches && !document.hidden && document.hasFocus();
   const toggleFor = (side: Side) => Array.from(document.querySelectorAll(side === 'left' ? LEFT_TOGGLE : RIGHT_TOGGLE))
     .find(el => visible(el) && typeof el.click === 'function') ?? null;
+  const rightDock = () => {
+    const panel = options.panels().get('explorer')
+      ?? Array.from(document.querySelectorAll(RIGHT_HOST)).find(visible)
+      ?? Array.from(document.querySelectorAll(RIGHT_HANDLE)).map(el => el.nextElementSibling).find((el): el is Element => Boolean(el && visible(el)))
+      ?? null;
+    return panel?.querySelector('[data-testid="workspace-explorer-sidebar"]') ? panel : null;
+  };
   const floating = () => Array.from(document.querySelectorAll(FLOATING)).some(visible);
   function refreshTriggers() {
     // Keep hover delivery possible when the focused frame changes. Opening
@@ -168,7 +178,11 @@ export function installEdgePeek(options: {
     restoreFrame = window.requestAnimationFrame(() => {
       restoreFrame = 0;
       if (!current?.restoring) return;
-      const root = current.root ?? (current.side === 'right' ? document.body.querySelector(RIGHT_HANDLE)?.nextElementSibling : null);
+      const root = current.root ?? (current.side === 'right' ? rightDock() : null);
+      if (!current.toggle.isConnected) {
+        const nextToggle = toggleFor(current.side);
+        if (nextToggle) current.toggle = nextToggle;
+      }
       const closed = !current.toggle.isConnected || current.toggle.getAttribute('aria-expanded') === 'false';
       if (closed && (!root || !visible(root))) cleanup();
       else awaitClosedLayout();
@@ -176,9 +190,16 @@ export function installEdgePeek(options: {
   }
   function restore(handoff = false) {
     if (!current) return;
+    // The observer and phaseTimer can both reach here; a second call would
+    // orphan the first restoreTimer, which could later tear down a newer preview.
+    if (current.restoring && !handoff) return;
     current.restoring = true;
-    // Use the original control only while it still belongs to this screen.
-    // Never toggle a newly navigated workspace's independent visibility.
+    // Paseo 0.13+ swaps the header explorer toggle for a sidebar-rail toggle
+    // while expanded; rebind to the active control on the current screen.
+    if (!current.toggle.isConnected) {
+      const nextToggle = toggleFor(current.side);
+      if (nextToggle) current.toggle = nextToggle;
+    }
     if (current.toggle.isConnected && current.toggle.getAttribute('aria-expanded') === 'true') click(current.toggle);
     if (handoff) { cleanup(true); return; }
     awaitClosedLayout();
@@ -249,6 +270,17 @@ export function installEdgePeek(options: {
     phaseTimer = window.setTimeout(() => {
       phaseTimer = 0;
       if (!current || current.closing) return;
+      if (!current.toggle.isConnected) {
+        const nextToggle = toggleFor(current.side);
+        if (nextToggle) current.toggle = nextToggle;
+      }
+      if (!current.root && current.side === 'right') {
+        const root = rightDock();
+        if (root) {
+          current.root = root; root.setAttribute(OWNER, 'right');
+          root.addEventListener('pointerleave', onPanelLeave);
+        }
+      }
       if (!current.root || current.toggle.getAttribute('aria-expanded') !== 'true') { close(true); return; }
       document.body.setAttribute(PHASE, 'open');
       options.onTransition(); considerLeave();
@@ -323,16 +355,19 @@ export function installEdgePeek(options: {
       awaitClosedLayout();
       return;
     }
-    if (!current.toggle.isConnected) { cleanup(); return; }
+    if (!current.toggle.isConnected) {
+      const nextToggle = toggleFor(current.side);
+      if (!nextToggle) { cleanup(); return; }
+      current.toggle = nextToggle;
+    }
     if (current.toggle.getAttribute('aria-expanded') !== 'true') {
       if (current.activated) restore();
       return;
     }
     current.activated = true;
     if (current.side === 'right' && !current.root) {
-      const handle = document.body.querySelector(RIGHT_HANDLE);
-      const root = handle?.nextElementSibling;
-      if (root?.querySelector('[data-testid="workspace-explorer-sidebar"]')) {
+      const root = rightDock();
+      if (root) {
         current.root = root; root.setAttribute(OWNER, 'right');
         root.addEventListener('pointerleave', onPanelLeave);
         considerLeave();
