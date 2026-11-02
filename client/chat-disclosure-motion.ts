@@ -1,3 +1,7 @@
+export const USER_MESSAGE_COLLAPSE_HEIGHT_PX = 240;
+export const USER_MESSAGE_FADE_HEIGHT_PX = 48;
+export const USER_MESSAGE_TOGGLE_HEIGHT_PX = 32;
+
 export interface ChatDisclosureMotionOptions {
   expanding: boolean;
   beforeHeight: number;
@@ -29,6 +33,22 @@ export interface ShouldAnimateChatDisclosureOptions {
   currentExpanded?: boolean | null;
   beforeHeight: number;
   currentHeight: number;
+}
+
+export interface ShouldPrecondenseUserMessageBubbleOptions {
+  hasHostToggle: boolean;
+  isExpanded?: boolean | null;
+  bodyHeight: number;
+  collapseThresholdPx?: number;
+}
+
+export function shouldPrecondenseUserMessageBubble(
+  options: ShouldPrecondenseUserMessageBubbleOptions,
+): boolean {
+  if (options.hasHostToggle) return false;
+  if (options.isExpanded === true) return false;
+  const threshold = options.collapseThresholdPx ?? USER_MESSAGE_COLLAPSE_HEIGHT_PX;
+  return Number.isFinite(options.bodyHeight) && options.bodyHeight > threshold + 0.5;
 }
 
 export function resolveChatBubbleExpandedState(

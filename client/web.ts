@@ -26,6 +26,8 @@ import {
   TOOL_SHIMMER_TRACK_END_PX,
   TOOL_SHIMMER_TRACK_START_PX,
   findEnteringToolGroupItems,
+  isRectOccluded,
+  resolveToolDetailRevealBoxes,
   shouldKeepToolShimmerActive,
   toolDetailHeightTransition,
   toolDetailShimmerStyle,
@@ -36,9 +38,13 @@ import {
 } from "./tool-detail-motion";
 import { messageEntranceMotion, shouldQueueMessageEntrance } from "./message-entry-motion";
 import {
+  USER_MESSAGE_COLLAPSE_HEIGHT_PX,
+  USER_MESSAGE_FADE_HEIGHT_PX,
+  USER_MESSAGE_TOGGLE_HEIGHT_PX,
   chatDisclosureMotion,
   resolveChatBubbleExpandedState,
   shouldAnimateChatDisclosure,
+  shouldPrecondenseUserMessageBubble,
 } from "./chat-disclosure-motion";
 
 /* Desktop/Web adapter for Paseo 0.11.2. Host DOM is not a public plugin API.
@@ -150,7 +156,7 @@ function metaItemKey(el: Element): string {
   if (testid === 'sidebar-workspace-project') return 'project';
   return 'pr';
 }
-const TITLE_EXCLUDED = '[role="button"],[role="menuitem"],svg';
+const TITLE_EXCLUDED = '[role="button"],[role="menuitem"],svg,[data-native-polish-reveal],[data-native-polish-ghost]';
 const TITLE_REVEAL_HORIZON_MS = 150;
 const PREF_KEY = 'paseo-native-polish:preferences:v1';
 const EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
@@ -194,6 +200,7 @@ function textSliceRange(owner: Element, start: number, end?: number): { range: T
   let endNode: TextNode | null = null;
   let endOffset = 0;
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.closest('[data-native-polish-ghost], [data-native-polish-reveal]')) continue;
     const length = node.textContent?.length ?? 0;
     nodes.push(node);
     if (!startNode && start <= total + length) {
@@ -248,6 +255,15 @@ const TAB_ROW = '[data-testid="workspace-tabs-scroll"]';
 // Tooltips are transient hover affordances. Giving their text an entrance and
 // a cloned exit makes it flash both when the pointer arrives and when it goes.
 const FLOATING = '[data-menu-surface="true"], [role="dialog"]';
+const MODAL_OCCLUDER =
+  '[role="dialog"], [aria-modal="true"], [data-menu-surface="true"], ' +
+  '[data-testid="tool-call-group-sheet"], [data-testid="composer-fullscreen"], ' +
+  '[data-testid="composer-autocomplete-popover"]';
+const OVERLAY_OCCLUDER =
+  MODAL_OCCLUDER +
+  ', [role="tooltip"], [data-testid="scroll-to-bottom-button"], ' +
+  '[data-testid="composer-diff-stat-pill"], [data-testid="composer-import-agent-pill"], ' +
+  '[data-testid="composer-parent-agent-pill"]';
 const CHAT = '[data-testid="agent-chat-scroll"]';
 const HISTORY_ROW = '[data-history-row-id]';
 const OUTLINE_RAIL = `[data-testid="${OUTLINE_RAIL_TEST_ID}"]`;
@@ -430,9 +446,13 @@ function restoreUnistyles(copy: Element, css: string): Element | null {
   return style;
 }
 function bubbleToggleFor(el: Element): Element | null {
-  const ariaToggle = el.querySelector('[role="button"][aria-expanded]');
+  const ariaToggle = el.querySelector(
+    '[role="button"][aria-expanded]:not([data-native-polish-precondense-toggle])',
+  );
   if (ariaToggle) return ariaToggle;
-  const children = Array.from(el.children);
+  const children = Array.from(el.children).filter(
+    child => child.getAttribute('data-native-polish-precondense-toggle') === null,
+  );
   if (children.length < 2) return null;
   const last = children[children.length - 1];
   return last?.matches('button, [role="button"]') ? last : null;
@@ -648,17 +668,35 @@ function installWebMotion(): () => void {
     for (const el of all(copy, 'iframe, video, audio, input, textarea')) el.remove();
     return copy;
   }
+  function collectOccluderRects(target: Element, selector: string): Rect[] {
+    const boxes: Rect[] = [];
+    const seen = new Set<Element>();
+    const add = (el: Element | null) => {
+      if (!el || seen.has(el) || el === target || el.closest('[data-native-polish-ghost]')) return;
+      if (el.contains?.(target) || hasAncestor(target, [el]) || !visible(el)) return;
+      seen.add(el);
+      boxes.push(rect(el));
+    };
+    for (const el of all(document.body, selector)) add(el);
+    for (const closeBtn of all(document.body, '[data-testid="tool-call-sheet-close"], [data-testid="tool-call-group-sheet-close"]')) {
+      if (!visible(closeBtn)) continue;
+      add(closeBtn.parentElement?.parentElement ?? closeBtn.parentElement ?? closeBtn);
+    }
+    return boxes;
+  }
   function ghost(before: Snapshot, horizontal = 0, milliseconds = duration()) {
     const copy = exitCopy(before);
     const style = window.getComputedStyle(before.element);
     const r = before.box;
     const values: Record<string, string> = {
       position: 'fixed', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`,
-      margin: '0', 'box-sizing': 'border-box', overflow: 'hidden', 'pointer-events': 'none', 'z-index': '90',
+      margin: '0', 'box-sizing': 'border-box', overflow: 'hidden', 'pointer-events': 'none', 'z-index': '0',
       color: style.getPropertyValue('color'), 'font-family': style.getPropertyValue('font-family'),
     };
     for (const [key, value] of Object.entries(values)) copy.style.setProperty(key, value, 'important');
-    document.body.appendChild(copy);
+    const overlayRoot = document.body.querySelector('#overlay-root');
+    if (overlayRoot?.parentElement === document.body) document.body.insertBefore(copy, overlayRoot);
+    else document.body.appendChild(copy);
     ghosts.add(copy);
     animate(copy, [{ opacity: 1, transform: 'translate(0,0)', clipPath: 'inset(0 0 0 0)' }, { opacity: 0, transform: `translate(${horizontal}px,-3px)`, clipPath: horizontal ? 'inset(0 0 0 0)' : 'inset(0 0 100% 0)' }], () => { copy.remove(); ghosts.delete(copy); }, 0, milliseconds);
   }
@@ -1020,6 +1058,7 @@ function installWebMotion(): () => void {
     contextKey: string;
     rowIds: Set<string>;
     seen: Set<string>;
+    seenUserMessages: Set<string>;
     seenCompactions: Set<string>;
     seenWorkedFooters: Set<string>;
     pending: Set<string>;
@@ -1061,7 +1100,7 @@ function installWebMotion(): () => void {
   }
   interface ToolDetailReveal {
     owner: Element;
-    clipBox: Element | null;
+    clipBoxes: Element[];
     startOffset: number;
     endOffset: number;
     backdropFrames: Record<string, string | number>[];
@@ -1071,6 +1110,7 @@ function installWebMotion(): () => void {
     tintLayer: Element;
     blurCovers: Element[];
     tintCovers: Element[];
+    restoreHost: () => void;
   }
   let toolDetailText = new Map<Element, ToolDetailTextState>();
   const toolDetailReveals = new Set<ToolDetailReveal>();
@@ -1109,6 +1149,11 @@ function installWebMotion(): () => void {
     body[data-native-polish-states="true"] :is(${TAB},[data-testid^="sidebar-workspace-"]) :is(svg,path,circle) {
       transition: color 150ms,stroke 150ms,fill 150ms;
     }
+    [data-window-content="true"], ${CHAT} {
+      position: relative;
+      z-index: 0;
+      isolation: isolate;
+    }
     body[data-native-polish-motion="true"] ${CHAT_TIMELINE} {
       will-change: transform;
     }
@@ -1120,6 +1165,12 @@ function installWebMotion(): () => void {
       width: auto !important;
       overflow: visible !important;
     }
+    body[data-native-polish-timeline="true"] [data-native-polish-shimmer-parent] {
+      position: relative !important;
+      overflow: hidden !important;
+      isolation: isolate;
+      z-index: 0;
+    }
     body[data-native-polish-timeline="true"] :is(${TOOL}) [style*="--paseo-shimmer"] {
       opacity: 0 !important;
     }
@@ -1129,6 +1180,7 @@ function installWebMotion(): () => void {
     body[data-native-polish-timeline="true"] [data-native-polish-shimmer-overlay] {
       position: absolute;
       inset: 0;
+      z-index: 1;
       display: flex;
       flex-direction: row;
       align-items: center;
@@ -1168,6 +1220,11 @@ function installWebMotion(): () => void {
     [data-testid="native-polish-streaming-assistant"][data-native-polish-gap-above="user"] { margin-top: -16px; }
     [data-testid="native-polish-streaming-assistant"][data-native-polish-gap-above="tool"] { margin-top: -12px; }
     [data-testid="native-polish-streaming-assistant"][data-native-polish-gap-below="default"] { padding-bottom: 12px; }
+    [data-native-polish-precondense-preview="true"] {
+      position: relative;
+      max-height: ${USER_MESSAGE_COLLAPSE_HEIGHT_PX}px;
+      overflow: hidden;
+    }
   `;
   document.head.appendChild(stylesheet);
   function updateMotionFlags() {
@@ -1210,6 +1267,7 @@ function installWebMotion(): () => void {
   function releaseRowClip(from: Element, row: Element): () => void {
     const restores: (() => void)[] = [];
     for (let at: Element | null = from; at && at !== row; at = at.parentElement) {
+      if (at.getAttribute('data-native-polish-shimmer-parent') !== null || at.getAttribute('data-native-polish-shimmer-overlay') !== null) continue;
       const style = window.getComputedStyle(at);
       const clipped = /^(hidden|clip)$/.test(style.getPropertyValue('overflow-y') || style.getPropertyValue('overflow'));
       if (clipped || at.style.getPropertyValue('height')) restores.push(temporaryStyles(at, { overflow: 'visible', height: 'auto', 'max-height': 'none' }));
@@ -1577,11 +1635,13 @@ function installWebMotion(): () => void {
   // Paseo owns the actual workspace-name node. During a rename we hide only
   // that leaf (retaining its layout and the host row's real background), then
   // temporarily draw the old/new title above it.
-  function paintTitleCover(overlay: Element, node: Element) {
+  function paintTitleCover(overlay: Element, node: Element, host: Element) {
     const r = rect(node);
+    const hostRect = host === document.body ? { left: 0, top: 0 } : rect(host);
     const style = window.getComputedStyle(node);
     const values: Record<string, string> = {
-      position: 'fixed', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`,
+      position: host === document.body ? 'fixed' : 'absolute',
+      left: `${r.left - hostRect.left}px`, top: `${r.top - hostRect.top}px`, width: `${r.width}px`, height: `${r.height}px`,
       display: 'block', margin: '0', padding: '0', 'box-sizing': 'border-box', overflow: 'hidden', 'pointer-events': 'none', 'z-index': '1',
       'background-color': 'transparent', color: style.getPropertyValue('color'),
       'font-family': style.getPropertyValue('font-family'), 'font-size': style.getPropertyValue('font-size'),
@@ -1595,13 +1655,24 @@ function installWebMotion(): () => void {
     for (const [property, value] of Object.entries(values)) overlay.style.setProperty(property, value, 'important');
   }
   function titleRevealCover(node: Element): TitleCover {
+    const host = node.closest(WORKSPACE_ROW) ?? node.parentElement ?? document.body;
+    const restoreHost =
+      host !== document.body && window.getComputedStyle(host).getPropertyValue('position') === 'static'
+        ? temporaryStyles(host, { position: 'relative' })
+        : () => {};
     const overlay = document.createElement('div');
     overlay.setAttribute('data-native-polish-reveal', '');
     overlay.setAttribute('aria-hidden', 'true');
-    paintTitleCover(overlay, node);
-    const restoreNode = temporaryStyles(node, { visibility: 'hidden' });
-    document.body.appendChild(overlay);
-    return { overlay, restoreNode };
+    paintTitleCover(overlay, node, host);
+    const restoreHidden = temporaryStyles(node, { visibility: 'hidden' });
+    host.appendChild(overlay);
+    return {
+      overlay,
+      restoreNode: () => {
+        restoreHidden();
+        restoreHost();
+      },
+    };
   }
   function removeTitleCovers() {
     for (const state of Array.from(titleReveals.values())) state.stop();
@@ -1953,10 +2024,12 @@ function installWebMotion(): () => void {
         );
         const hasHostShimmer = all(header, '[style*="--paseo-shimmer"]').length > 0;
         const hasPlaceholder = Boolean(header.querySelector('[data-testid="tool-call-summary-placeholder"]'));
+        const labelOccluded = isRectOccluded(rect(labelRow), collectOccluderRects(labelRow, MODAL_OCCLUDER));
         const shouldShimmer =
           canAnimate()
           && getPreferences().timeline
           && Boolean(current.primary)
+          && !labelOccluded
           && shouldKeepToolShimmerActive({
             hasHostShimmer,
             hasPlaceholder,
@@ -1969,6 +2042,7 @@ function installWebMotion(): () => void {
         let primaryShimmer: Element | null = null;
         let secondaryShimmer: Element | null = null;
         if (shouldShimmer) {
+          decorate(labelRow, 'data-native-polish-shimmer-parent');
           if (!overlay) {
             overlay = document.createElement('div');
             overlay.setAttribute('data-native-polish-shimmer-overlay', 'true');
@@ -2011,6 +2085,8 @@ function installWebMotion(): () => void {
           active.get(overlay)?.();
           overlay.remove();
           decorations.delete(overlay);
+          labelRow.removeAttribute('data-native-polish-shimmer-parent');
+          decorations.delete(labelRow);
         }
         if (allow && !toolChatHydrating && getPreferences().timeline) {
           const transition = toolLabelUpdateTransition(toolLabels.get(labelKey), current);
@@ -2286,26 +2362,20 @@ function installWebMotion(): () => void {
     if (!reveal.owner.isConnected || !reveal.root.isConnected) return false;
     const slice = textSliceRange(reveal.owner, reveal.startOffset, reveal.endOffset);
     if (!slice) return false;
-    const clipBounds = reveal.clipBox?.isConnected ? rect(reveal.clipBox) : null;
-    const rawBoxes = Array.from(slice.range.getClientRects()).filter(box => box.width > 0 && box.height > 0).slice(0, 40);
-    const boxes: Array<{ left: number; top: number; width: number; height: number }> = [];
-    for (const box of rawBoxes) {
-      const paddedLeft = box.left - 1;
-      const paddedTop = box.top - 1;
-      const paddedRight = box.right + 2;
-      const paddedBottom = box.bottom + 1;
-      const left = clipBounds ? Math.max(paddedLeft, clipBounds.left + 1) : paddedLeft;
-      const top = clipBounds ? Math.max(paddedTop, clipBounds.top + 1) : paddedTop;
-      const right = clipBounds ? Math.min(paddedRight, clipBounds.right - 1) : paddedRight;
-      const bottom = clipBounds ? Math.min(paddedBottom, clipBounds.bottom - 1) : paddedBottom;
-      if (right - left > 0.5 && bottom - top > 0.5) {
-        boxes.push({ left, top, width: right - left, height: bottom - top });
-      }
-    }
+    const clipBounds = reveal.clipBoxes.filter(el => el.isConnected).map(rect);
+    const occludingRects = collectOccluderRects(reveal.owner, OVERLAY_OCCLUDER);
+    const rawBoxes = Array.from(slice.range.getClientRects()).filter(box => box.width > 0 && box.height > 0);
+    const boxes = resolveToolDetailRevealBoxes({
+      glyphBoxes: rawBoxes,
+      ownerRect: rect(reveal.root),
+      clipBounds,
+      occludingRects,
+      maxBoxes: 40,
+    });
     const backgroundColor = nearestPaintedBackground(slice.anchor);
     while (reveal.blurCovers.length < boxes.length) {
       const blurCover = document.createElement('div');
-      blurCover.style.setProperty('position', 'fixed', 'important');
+      blurCover.style.setProperty('position', 'absolute', 'important');
       blurCover.style.setProperty('pointer-events', 'none', 'important');
       blurCover.style.setProperty('border-radius', '3px', 'important');
       reveal.blurLayer.appendChild(blurCover);
@@ -2323,7 +2393,7 @@ function installWebMotion(): () => void {
     while (reveal.blurCovers.length > boxes.length) reveal.blurCovers.pop()?.remove();
     while (reveal.tintCovers.length < boxes.length) {
       const tintCover = document.createElement('div');
-      tintCover.style.setProperty('position', 'fixed', 'important');
+      tintCover.style.setProperty('position', 'absolute', 'important');
       tintCover.style.setProperty('pointer-events', 'none', 'important');
       tintCover.style.setProperty('border-radius', '3px', 'important');
       reveal.tintLayer.appendChild(tintCover);
@@ -2449,28 +2519,36 @@ function installWebMotion(): () => void {
       // 400ms. Keeping `root` and `blurLayer` at opacity 1 avoids creating a
       // CSS Backdrop Root while the host remains the sole text painter.
       if (!textSliceRange(owner, transition.enteringStart, transition.enteringEnd)) continue;
+      const host = detail;
+      const restoreHost =
+        window.getComputedStyle(host).getPropertyValue('position') === 'static'
+          ? temporaryStyles(host, { position: 'relative' })
+          : () => {};
       const root = document.createElement('div');
       root.setAttribute('data-native-polish-ghost', '');
       root.setAttribute('aria-hidden', 'true');
       root.setAttribute('inert', '');
-      root.style.setProperty('position', 'fixed', 'important');
+      root.style.setProperty('position', 'absolute', 'important');
       root.style.setProperty('inset', '0', 'important');
       root.style.setProperty('pointer-events', 'none', 'important');
-      root.style.setProperty('z-index', '90', 'important');
+      root.style.setProperty('z-index', '1', 'important');
       const blurLayer = document.createElement('div');
-      blurLayer.style.setProperty('position', 'fixed', 'important');
+      blurLayer.style.setProperty('position', 'absolute', 'important');
       blurLayer.style.setProperty('inset', '0', 'important');
       blurLayer.style.setProperty('pointer-events', 'none', 'important');
       const tintLayer = document.createElement('div');
-      tintLayer.style.setProperty('position', 'fixed', 'important');
+      tintLayer.style.setProperty('position', 'absolute', 'important');
       tintLayer.style.setProperty('inset', '0', 'important');
       tintLayer.style.setProperty('pointer-events', 'none', 'important');
       root.appendChild(blurLayer);
       root.appendChild(tintLayer);
-      document.body.appendChild(root);
+      host.appendChild(root);
+      const clipBoxes: Element[] = [];
+      if (layout.scrollBox) clipBoxes.push(layout.scrollBox);
+      if (detailChat && detailChat !== layout.scrollBox) clipBoxes.push(detailChat);
       const reveal: ToolDetailReveal = {
         owner,
-        clipBox: layout.scrollBox ?? detailChat,
+        clipBoxes,
         startOffset: transition.enteringStart,
         endOffset: transition.enteringEnd,
         backdropFrames: transition.backdrop,
@@ -2480,16 +2558,17 @@ function installWebMotion(): () => void {
         tintLayer,
         blurCovers: [],
         tintCovers: [],
+        restoreHost,
       };
       toolDetailReveals.add(reveal);
       ghosts.add(root);
       if (!syncToolDetailReveal(reveal)) {
-        root.remove(); ghosts.delete(root); toolDetailReveals.delete(reveal);
+        root.remove(); ghosts.delete(root); toolDetailReveals.delete(reveal); reveal.restoreHost();
         continue;
       }
       if (!revealFrame) revealFrame = window.requestAnimationFrame(tickToolDetailReveals);
       animate(tintLayer, transition.cover, () => {
-        root.remove(); ghosts.delete(root); toolDetailReveals.delete(reveal);
+        root.remove(); ghosts.delete(root); toolDetailReveals.delete(reveal); reveal.restoreHost();
       }, 0, transition.durationMs);
     }
     for (const [detail, state] of toolDetailText) {
@@ -2593,10 +2672,114 @@ function installWebMotion(): () => void {
     }
     return results;
   }
+  function userMessageSignature(row: Element, counts: Map<string, number>): string | null {
+    const userMsg = row.querySelector(USER_MESSAGE);
+    if (!userMsg) return null;
+    const textEl = userMsg.querySelector('[data-message-text="true"]') ?? userMsg;
+    const normalized = (textEl.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const count = counts.get(normalized) ?? 0;
+    counts.set(normalized, count + 1);
+    return `user:${normalized}#${count}`;
+  }
+  function syncUserMessagePrecondense(chat: Element, old?: ChatState) {
+    for (const userMsg of all(chat, USER_MESSAGE)) {
+      if (userMsg.closest('[data-native-polish-ghost]')) continue;
+      const textEl = userMsg.querySelector('[data-message-text="true"]');
+      const body = textEl?.parentElement ?? null;
+      const preview = body?.parentElement ?? null;
+      const bubble = preview?.parentElement ?? null;
+      if (!textEl || !body || !preview || !bubble || !hasAncestor(body, [userMsg])) continue;
+      const hostToggle =
+        Array.from(bubble.children).find(
+          (child) =>
+            child !== preview &&
+            child.getAttribute('data-native-polish-precondense-toggle') === null &&
+            child.matches('button, [role="button"]'),
+        ) ??
+        bubble.querySelector(
+          '[role="button"][aria-expanded]:not([data-native-polish-precondense-toggle])',
+        );
+      const preFade = preview.querySelector('[data-native-polish-precondense-fade]');
+      const preToggle = bubble.querySelector('[data-native-polish-precondense-toggle]');
+      const bodyHeight = Math.max(rect(body).height, body.scrollHeight || 0);
+      const isExpanded = hostToggle ? bubbleExpandedState(hostToggle, preview) : false;
+      if (
+        !shouldPrecondenseUserMessageBubble({
+          hasHostToggle: Boolean(hostToggle),
+          isExpanded,
+          bodyHeight,
+        })
+      ) {
+        preFade?.remove();
+        preToggle?.remove();
+        if (preview.getAttribute('data-native-polish-precondense-preview') !== null) {
+          preview.removeAttribute('data-native-polish-precondense-preview');
+        }
+        continue;
+      }
+      const beforeMaxScrollTop = Math.max(0, chat.scrollHeight - chat.clientHeight);
+      const wasAtPreToggleBottom =
+        beforeMaxScrollTop > 0 &&
+        beforeMaxScrollTop - chat.scrollTop <= BOTTOM_SCROLL_EPSILON_PX &&
+        (!old || chat.scrollTop >= old.scrollTop - 0.5);
+      if (preview.getAttribute('data-native-polish-precondense-preview') !== 'true') {
+        preview.setAttribute('data-native-polish-precondense-preview', 'true');
+      }
+      if (!preFade) {
+        const fade = document.createElement('div');
+        fade.setAttribute('data-native-polish-precondense-fade', 'true');
+        fade.setAttribute('data-native-polish-ghost', '');
+        fade.setAttribute('aria-hidden', 'true');
+        fade.style.setProperty('position', 'absolute');
+        fade.style.setProperty('bottom', '0px');
+        fade.style.setProperty('left', '0px');
+        fade.style.setProperty('right', '0px');
+        fade.style.setProperty('height', `${USER_MESSAGE_FADE_HEIGHT_PX}px`);
+        fade.style.setProperty('pointer-events', 'none');
+        fade.style.setProperty(
+          'background-image',
+          `linear-gradient(to bottom, transparent 0%, var(--colors-surface3, ${nearestPaintedBackground(bubble)}) 100%)`,
+        );
+        preview.appendChild(fade);
+      }
+      if (!preToggle) {
+        const toggle = document.createElement('div');
+        toggle.setAttribute('data-native-polish-precondense-toggle', 'true');
+        toggle.setAttribute('data-native-polish-ghost', '');
+        toggle.setAttribute('aria-hidden', 'true');
+        toggle.textContent = 'Show more';
+        const fontFamily = window.getComputedStyle(textEl).getPropertyValue('font-family');
+        toggle.style.setProperty('height', `${USER_MESSAGE_TOGGLE_HEIGHT_PX}px`);
+        toggle.style.setProperty('min-height', '0px');
+        toggle.style.setProperty('align-self', 'flex-start');
+        toggle.style.setProperty('display', 'flex');
+        toggle.style.setProperty('flex-direction', 'row');
+        toggle.style.setProperty('align-items', 'center');
+        toggle.style.setProperty('justify-content', 'center');
+        toggle.style.setProperty('padding', '0px');
+        toggle.style.setProperty('margin', '0px');
+        toggle.style.setProperty('border-width', '0px');
+        toggle.style.setProperty('background-color', 'transparent');
+        toggle.style.setProperty('pointer-events', 'none');
+        toggle.style.setProperty('user-select', 'none');
+        toggle.style.setProperty('color', 'var(--colors-foreground-muted, rgba(160, 160, 160, 0.85))');
+        toggle.style.setProperty('font-size', '14px');
+        toggle.style.setProperty('line-height', '20px');
+        toggle.style.setProperty('font-weight', '500');
+        toggle.style.setProperty('flex-shrink', '0');
+        if (fontFamily) toggle.style.setProperty('font-family', fontFamily);
+        bubble.appendChild(toggle);
+      }
+      if (wasAtPreToggleBottom) {
+        chat.scrollTop = Math.max(0, chat.scrollHeight - chat.clientHeight);
+      }
+    }
+  }
   function updateMessages(allow: boolean) {
     const activeChats = live(CHAT);
     for (const chat of activeChats) {
       const old = chats.get(chat);
+      syncUserMessagePrecondense(chat, old);
       const rows = all(chat, HISTORY_ROW);
       const contextKey = chatContextKey(chat);
       const currentRowIds = new Set(rows.map((row) => row.getAttribute('data-history-row-id') ?? '').filter(Boolean));
@@ -2625,6 +2808,12 @@ function installWebMotion(): () => void {
         old.contextKey = contextKey;
         old.rowIds = currentRowIds;
         old.seen = new Set(currentRowIds);
+        old.seenUserMessages = new Set();
+        const switchedUserCounts = new Map<string, number>();
+        for (const row of rows) {
+          const sig = userMessageSignature(row, switchedUserCounts);
+          if (sig) old.seenUserMessages.add(sig);
+        }
         old.seenCompactions = new Set();
         for (const item of all(chat, '[data-testid="stream-item"]')) {
           if (!(item.textContent?.trim() ?? '').startsWith('Compacting')) continue;
@@ -2698,9 +2887,24 @@ function installWebMotion(): () => void {
       const contextKey = chatContextKey(chat);
       const running = Boolean(chat.querySelector('[data-testid="turn-working-indicator"]'));
       const seen = old?.seen ?? new Set<string>();
+      const seenUserMessages = old?.seenUserMessages ?? new Set<string>();
       const seenCompactions = old?.seenCompactions ?? new Set<string>();
       const seenWorkedFooters = old?.seenWorkedFooters ?? new Set<string>();
       const candidates = allow ? old?.pending ?? new Set<string>() : new Set<string>();
+      const currentIds = new Set(rows.map((row) => row.getAttribute('data-history-row-id') ?? '').filter(Boolean));
+      const hadRemovedRowId = Boolean(
+        old && Array.from(old.rowIds).some((prevId) => !currentIds.has(prevId)),
+      );
+      const userSigCounts = new Map<string, number>();
+      for (const row of rows) {
+        const id = row.getAttribute('data-history-row-id') ?? '';
+        const sig = userMessageSignature(row, userSigCounts);
+        if (!sig) continue;
+        if (id && !seen.has(id) && hadRemovedRowId && seenUserMessages.has(sig)) {
+          seen.add(id);
+        }
+        seenUserMessages.add(sig);
+      }
       const firstHistoryPopulation = Boolean(!old || (old.seen.size === 0 && rows.length > 0));
       const isFirstLiveUserTurn = Boolean(
         allow &&
@@ -3036,11 +3240,11 @@ function installWebMotion(): () => void {
         }
       }
       while (seen.size > 5000) seen.delete(seen.values().next().value!);
+      while (seenUserMessages.size > 1000) seenUserMessages.delete(seenUserMessages.values().next().value!);
       while (seenCompactions.size > 500) seenCompactions.delete(seenCompactions.values().next().value!);
       while (seenWorkedFooters.size > 1000) seenWorkedFooters.delete(seenWorkedFooters.values().next().value!);
-      const currentIds = new Set(rows.map(row => row.getAttribute('data-history-row-id')!));
       for (const id of candidates) if (!atBottom || !currentIds.has(id)) candidates.delete(id);
-      chats.set(chat, { contextKey, rowIds: currentIds, seen, seenCompactions, seenWorkedFooters, pending: candidates, running, completedFooterPendingUntil, scrollTop: currentScrollTop, compensatedScrollTop, pendingBottomUntil, userScrolledUp, maxScrollTop, scrollHeight: currentScrollHeight, clientHeight: currentClientHeight, clientWidth: currentClientWidth, footer, footerTop, stream, handoff, handoffQuietUntil, hydrationQuietUntil, reflowQuietUntil });
+      chats.set(chat, { contextKey, rowIds: currentIds, seen, seenUserMessages, seenCompactions, seenWorkedFooters, pending: candidates, running, completedFooterPendingUntil, scrollTop: currentScrollTop, compensatedScrollTop, pendingBottomUntil, userScrolledUp, maxScrollTop, scrollHeight: currentScrollHeight, clientHeight: currentClientHeight, clientWidth: currentClientWidth, footer, footerTop, stream, handoff, handoffQuietUntil, hydrationQuietUntil, reflowQuietUntil });
     }
   }
   // ChatOutlineRail mounts `[data-testid="chat-outline-rail"]` inside its
@@ -3476,7 +3680,7 @@ function installWebMotion(): () => void {
       if (pending && !shellChanged && !target.closest(CHAT + ', ' + WORKSPACE_SCROLL + ', ' + FILE_TREE + ', ' + CHANGE_TREE + ', ' + TAB_ROW + ', ' + FLOATING)) shellChanged = true;
       if (record.attributeName === 'data-status-bucket') { scheduleAmbient(['agents']); continue; }
       // Reused dialog portal surfaces open by gaining role="dialog".
-      if (record.attributeName === 'role') { scheduleAmbient(['floating', 'controls']); continue; }
+      if (record.attributeName === 'role') { scheduleAmbient(['floating', 'controls', 'tools']); continue; }
       if (!pending && canAnimate() && !document.activeElement?.closest(SHORTCUT_EDITOR) && record.attributeName === 'aria-expanded' && target.matches('[data-testid="menu-button"], [data-testid="workspace-explorer-toggle"]')) {
         pending = { panels: panelBaseline, panes: new Map(), paneAction: false, paneMotion: false, disclosure: null, tree: null };
         shellChanged = true;
@@ -3486,7 +3690,7 @@ function installWebMotion(): () => void {
       }
       if (structural || record.attributeName === 'aria-expanded' || target.matches(PANE) || target.querySelector(PANE)) schedule();
       const meaningful = structural || record.type === 'characterData' || ['aria-expanded', 'aria-selected', 'aria-busy'].includes(record.attributeName ?? '');
-      if (target.closest(CHAT)) {
+      if (target.closest(CHAT) || (structural && target.querySelector(CHAT))) {
         if (meaningful || textual) {
           refreshChatNow = true;
         }
@@ -3499,7 +3703,7 @@ function installWebMotion(): () => void {
       } else if (target.closest(TAB_ROW)) {
         if (meaningful || target.matches(TAB)) scheduleAmbient(['tabs', 'agents', 'controls']);
       } else if (target.closest(FLOATING)) {
-        if (meaningful || target.matches(FLOATING)) scheduleAmbient(['floating', 'controls']);
+        if (meaningful || target.matches(FLOATING)) scheduleAmbient(['floating', 'controls', 'tools']);
       } else if (structural || target.matches(PANE) || target.querySelector(PANE)) {
         // Shell commits may mount/remove any surface, including portal menus.
         scheduleAmbient();

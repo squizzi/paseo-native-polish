@@ -424,6 +424,162 @@ export function toolDetailTextTransition(previous: string | undefined, current: 
   };
 }
 
+export interface ToolDetailRevealRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+export interface ToolDetailRevealBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface InternalBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function isValidRect(rect: ToolDetailRevealRect | null | undefined): rect is ToolDetailRevealRect {
+  return Boolean(
+    rect &&
+      Number.isFinite(rect.left) &&
+      Number.isFinite(rect.top) &&
+      Number.isFinite(rect.right) &&
+      Number.isFinite(rect.bottom) &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.right > rect.left &&
+      rect.bottom > rect.top,
+  );
+}
+
+function subtractOccludingRect(box: InternalBox, occluder: ToolDetailRevealRect): InternalBox[] {
+  if (
+    occluder.right <= box.left ||
+    occluder.left >= box.right ||
+    occluder.bottom <= box.top ||
+    occluder.top >= box.bottom
+  ) {
+    return [box];
+  }
+  const slices: InternalBox[] = [];
+  if (occluder.top > box.top) {
+    slices.push({
+      left: box.left,
+      top: box.top,
+      right: box.right,
+      bottom: Math.min(box.bottom, occluder.top),
+    });
+  }
+  if (occluder.bottom < box.bottom) {
+    slices.push({
+      left: box.left,
+      top: Math.max(box.top, occluder.bottom),
+      right: box.right,
+      bottom: box.bottom,
+    });
+  }
+  const midTop = Math.max(box.top, occluder.top);
+  const midBottom = Math.min(box.bottom, occluder.bottom);
+  if (midBottom - midTop > 0.5) {
+    if (occluder.left > box.left) {
+      slices.push({
+        left: box.left,
+        top: midTop,
+        right: Math.min(box.right, occluder.left),
+        bottom: midBottom,
+      });
+    }
+    if (occluder.right < box.right) {
+      slices.push({
+        left: Math.max(box.left, occluder.right),
+        top: midTop,
+        right: box.right,
+        bottom: midBottom,
+      });
+    }
+  }
+  return slices.filter((slice) => slice.right - slice.left > 0.5 && slice.bottom - slice.top > 0.5);
+}
+
+export function isRectOccluded(
+  target: ToolDetailRevealRect | null | undefined,
+  occludingRects: readonly (ToolDetailRevealRect | null | undefined)[],
+): boolean {
+  if (!isValidRect(target)) return false;
+  for (const occluder of occludingRects) {
+    if (!isValidRect(occluder)) continue;
+    if (
+      occluder.left < target.right &&
+      occluder.right > target.left &&
+      occluder.top < target.bottom &&
+      occluder.bottom > target.top
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function resolveToolDetailRevealBoxes(input: {
+  glyphBoxes: readonly ToolDetailRevealRect[];
+  ownerRect: ToolDetailRevealRect;
+  clipBounds?: readonly (ToolDetailRevealRect | null | undefined)[];
+  occludingRects?: readonly (ToolDetailRevealRect | null | undefined)[];
+  maxBoxes?: number;
+}): ToolDetailRevealBox[] {
+  const { glyphBoxes, ownerRect, clipBounds = [], occludingRects = [], maxBoxes = 40 } = input;
+  const validClips = clipBounds.filter(isValidRect);
+  const validOccluders = occludingRects.filter(isValidRect);
+  const results: ToolDetailRevealBox[] = [];
+
+  for (const raw of glyphBoxes.filter(isValidRect).slice(0, maxBoxes)) {
+    let left = raw.left - 1;
+    let top = raw.top - 1;
+    let right = raw.right + 2;
+    let bottom = raw.bottom + 1;
+
+    for (const clip of validClips) {
+      left = Math.max(left, clip.left + 1);
+      top = Math.max(top, clip.top + 1);
+      right = Math.min(right, clip.right - 1);
+      bottom = Math.min(bottom, clip.bottom - 1);
+    }
+
+    if (right - left <= 0.5 || bottom - top <= 0.5) continue;
+
+    let fragments: InternalBox[] = [{ left, top, right, bottom }];
+    for (const occluder of validOccluders) {
+      const nextFragments: InternalBox[] = [];
+      for (const fragment of fragments) {
+        nextFragments.push(...subtractOccludingRect(fragment, occluder));
+      }
+      fragments = nextFragments;
+      if (fragments.length === 0) break;
+    }
+
+    for (const fragment of fragments) {
+      results.push({
+        left: fragment.left - ownerRect.left,
+        top: fragment.top - ownerRect.top,
+        width: fragment.right - fragment.left,
+        height: fragment.bottom - fragment.top,
+      });
+      if (results.length >= maxBoxes) return results;
+    }
+  }
+
+  return results;
+}
+
 export function toolDetailHeightTransition(input: {
   previousHeight: number | null | undefined;
   currentHeight: number;

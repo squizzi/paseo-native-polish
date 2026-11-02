@@ -12,6 +12,8 @@ import {
   TOOL_SHIMMER_TRACK_START_PX,
   finalizeStreamingMarkdown,
   findEnteringToolGroupItems,
+  isRectOccluded,
+  resolveToolDetailRevealBoxes,
   shouldKeepToolShimmerActive,
   toolDetailHeightTransition,
   toolDetailShimmerStyle,
@@ -397,4 +399,87 @@ test("toolDetailTextTransition recovers the entering link text when previous sna
   assert.equal(transition?.enteringText, "web.ts");
   assert.equal(transition?.enteringStart, "Updated ".length);
   assert.equal(transition?.enteringEnd, "Updated web.ts".length);
+});
+
+test("resolveToolDetailRevealBoxes converts glyph rects into owner-local coordinates and clips against both nested scrollBox and outer chat viewport", () => {
+  const ownerRect = { left: 100, top: 200, right: 500, bottom: 380, width: 400, height: 180 };
+  const scrollBox = { left: 100, top: 200, right: 500, bottom: 380, width: 400, height: 180 };
+  const chatViewport = { left: 80, top: 240, right: 600, bottom: 350, width: 520, height: 110 };
+
+  const boxes = resolveToolDetailRevealBoxes({
+    glyphBoxes: [
+      // Fully above chatViewport top (scrolled under header) -> dropped
+      { left: 120, top: 205, right: 260, bottom: 225, width: 140, height: 20 },
+      // Partially clipped by chatViewport top (240 + 1 = 241)
+      { left: 120, top: 235, right: 260, bottom: 255, width: 140, height: 20 },
+      // Fully visible inside both scrollBox and chatViewport
+      { left: 120, top: 270, right: 300, bottom: 290, width: 180, height: 20 },
+    ],
+    ownerRect,
+    clipBounds: [scrollBox, chatViewport],
+  });
+
+  assert.deepEqual(boxes, [
+    {
+      left: 119 - ownerRect.left,
+      top: 241 - ownerRect.top,
+      width: 262 - 119,
+      height: 256 - 241,
+    },
+    {
+      left: 119 - ownerRect.left,
+      top: 269 - ownerRect.top,
+      width: 302 - 119,
+      height: 291 - 269,
+    },
+  ]);
+});
+
+test("resolveToolDetailRevealBoxes subtracts open modals, popovers, and floating pills so streaming reveals never clip over them", () => {
+  const ownerRect = { left: 100, top: 100, right: 600, bottom: 400, width: 500, height: 300 };
+  const glyph = { left: 120, top: 180, right: 420, bottom: 200, width: 300, height: 20 };
+
+  // Full-screen modal backdrop completely occludes the streaming glyph box.
+  assert.deepEqual(
+    resolveToolDetailRevealBoxes({
+      glyphBoxes: [glyph],
+      ownerRect,
+      occludingRects: [{ left: 0, top: 0, right: 1280, bottom: 800, width: 1280, height: 800 }],
+    }),
+    [],
+  );
+
+  // Floating pill or popover overlapping the right half of the streaming line clips the reveal box to the left of the overlay.
+  assert.deepEqual(
+    resolveToolDetailRevealBoxes({
+      glyphBoxes: [glyph],
+      ownerRect,
+      occludingRects: [{ left: 260, top: 170, right: 480, bottom: 220, width: 220, height: 50 }],
+    }),
+    [
+      {
+        left: 119 - ownerRect.left,
+        top: 179 - ownerRect.top,
+        width: 260 - 119,
+        height: 201 - 179,
+      },
+    ],
+  );
+});
+
+test("isRectOccluded detects when a tool header shimmer is covered by an open modal or dialog", () => {
+  const labelRect = { left: 120, top: 160, right: 340, bottom: 184, width: 220, height: 24 };
+  assert.equal(isRectOccluded(labelRect, []), false);
+  assert.equal(
+    isRectOccluded(labelRect, [
+      { left: 400, top: 160, right: 700, bottom: 500, width: 300, height: 340 },
+    ]),
+    false,
+  );
+  assert.equal(
+    isRectOccluded(labelRect, [
+      { left: 200, top: 100, right: 600, bottom: 450, width: 400, height: 350 },
+    ]),
+    true,
+  );
 });

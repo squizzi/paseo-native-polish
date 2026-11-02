@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  USER_MESSAGE_COLLAPSE_HEIGHT_PX,
+  USER_MESSAGE_FADE_HEIGHT_PX,
+  USER_MESSAGE_TOGGLE_HEIGHT_PX,
   resolveChatBubbleExpandedState,
   shouldAnimateChatDisclosure,
+  shouldPrecondenseUserMessageBubble,
   chatDisclosureMotion,
 } from "../client/chat-disclosure-motion.ts";
 
@@ -274,4 +278,58 @@ test("chat disclosure motion formats keyframes correctly for long messages", () 
   ]);
   assert.equal(collapseMotion.priority, "important");
   assert.equal(collapseMotion.styles["max-height"], "none");
+});
+
+test("shouldPrecondenseUserMessageBubble pre-condenses newly sent long user messages before async onLayout mounts Show more", () => {
+  assert.equal(USER_MESSAGE_COLLAPSE_HEIGHT_PX, 240);
+  assert.equal(USER_MESSAGE_FADE_HEIGHT_PX, 48);
+  assert.equal(USER_MESSAGE_TOGGLE_HEIGHT_PX, 32);
+
+  // Frame 1 of a newly sent long user message (bodyHeight > 240px, host toggle not yet mounted)
+  assert.equal(
+    shouldPrecondenseUserMessageBubble({
+      hasHostToggle: false,
+      isExpanded: false,
+      bodyHeight: 520,
+    }),
+    true,
+  );
+
+  // Short user message (bodyHeight <= 240px) must not be pre-condensed
+  assert.equal(
+    shouldPrecondenseUserMessageBubble({
+      hasHostToggle: false,
+      isExpanded: false,
+      bodyHeight: 240,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldPrecondenseUserMessageBubble({
+      hasHostToggle: false,
+      isExpanded: false,
+      bodyHeight: 120,
+    }),
+    false,
+  );
+
+  // Frame 2 once Paseo mounts its own Show more button (hasHostToggle = true)
+  assert.equal(
+    shouldPrecondenseUserMessageBubble({
+      hasHostToggle: true,
+      isExpanded: false,
+      bodyHeight: 520,
+    }),
+    false,
+  );
+
+  // Expanded bubble must not be pre-condensed
+  assert.equal(
+    shouldPrecondenseUserMessageBubble({
+      hasHostToggle: false,
+      isExpanded: true,
+      bodyHeight: 520,
+    }),
+    false,
+  );
 });
