@@ -5,6 +5,7 @@ import { installEdgePeek } from "./edge-peek";
 import {
   BOTTOM_SCROLL_EPSILON_PX,
   isFollowingScrollBottom,
+  resolveChatHydrationQuietUntil,
   resolveFollowOutputScroll,
   resolveStreamingAssistantGaps,
   resolveUserMessageEntranceDelayMs,
@@ -878,6 +879,17 @@ function installWebMotion(): () => void {
   function animateDisclosure(before: Disclosure) {
     const el = before.element;
     if (!visible(el)) return;
+    const disclosureChat = before.chat ?? el.closest(CHAT);
+    if (disclosureChat) {
+      const chatState = chats.get(disclosureChat);
+      if (
+        disclosureChat.getAttribute('data-native-polish-hydrating') === 'true' ||
+        !chatState ||
+        Date.now() < chatState.hydrationQuietUntil
+      ) {
+        return;
+      }
+    }
     const children = Array.from(el.children);
     const toggle = before.toggle?.isConnected && hasAncestor(before.toggle, [el])
       ? before.toggle
@@ -1079,11 +1091,14 @@ function installWebMotion(): () => void {
     handoffQuietUntil: number;
     hydrationQuietUntil: number;
     reflowQuietUntil: number;
+    textSignature: string;
   }
   interface StreamRowState { id: string; index: number; text: string }
   interface ContentRise { start(distance: number): void; prepare(distance: number): void; cancel(): void; getOffset(): number }
   interface ChatHeightAnimationToken { element: Element }
   const chats = new WeakMap<Element, ChatState>();
+  let visibleChats = new Set<Element>();
+  const hydrationTimers = new Map<Element, number>();
   const seenWorkedFooterNodes = new WeakSet<Element>();
   const chatDisclosureQuietUntil = new WeakMap<Element, number>();
   const chatHeightAnimations = new WeakMap<Element, Set<ChatHeightAnimationToken>>();
@@ -1224,6 +1239,10 @@ function installWebMotion(): () => void {
       position: relative;
       max-height: ${USER_MESSAGE_COLLAPSE_HEIGHT_PX}px;
       overflow: hidden;
+    }
+    ${CHAT}[data-native-polish-hydrating="true"],
+    ${CHAT}[data-native-polish-hydrating="true"] * {
+      transition: none !important;
     }
   `;
   document.head.appendChild(stylesheet);
@@ -1906,12 +1925,26 @@ function installWebMotion(): () => void {
     }
     agentStates = nextAgents;
   }
-  function updateIcons(slots: Element[], old: Map<Element, string>, allow: boolean) {
+  function updateIcons(
+    slots: Element[],
+    old: Map<Element, string>,
+    allow: boolean,
+    canAnimateSlot?: (slot: Element) => boolean,
+  ) {
     const next = new Map<Element, string>();
     for (const slot of slots) {
       const signature = iconSignature(slot);
       next.set(slot, signature);
-      if (allow && getPreferences().states && old.has(slot) && old.get(slot) !== signature && !active.has(slot)) animate(slot, [{ opacity: .2, scale: .9 }, { opacity: 1, scale: 1 }], undefined, 0, 150);
+      if (
+        allow &&
+        (!canAnimateSlot || canAnimateSlot(slot)) &&
+        getPreferences().states &&
+        old.has(slot) &&
+        old.get(slot) !== signature &&
+        !active.has(slot)
+      ) {
+        animate(slot, [{ opacity: .2, scale: .9 }, { opacity: 1, scale: 1 }], undefined, 0, 150);
+      }
     }
     return next;
   }
@@ -1987,6 +2020,7 @@ function installWebMotion(): () => void {
       return state;
     };
     const slots: Element[] = [];
+    const hydratingSlots = new Set<Element>();
     const now = Date.now();
     for (const tool of live(TOOL).slice(-80)) {
       const header = firstBoxChild(tool);
@@ -1996,6 +2030,14 @@ function installWebMotion(): () => void {
       const labelChildren = labelRow ? Array.from(labelRow.children) : [];
       const primary = labelChildren.find((child) => !child.matches('[data-native-polish-shimmer-overlay]')) ?? null;
       if (primary) decorate(primary, 'data-native-polish-tool-label');
+      const toolChat = tool.closest(CHAT);
+      const toolChatState = toolChat ? chats.get(toolChat) : undefined;
+      const toolChatHydrating = Boolean(
+        toolChat &&
+          (toolChat.getAttribute('data-native-polish-hydrating') === 'true' ||
+            !toolChatState ||
+            now < toolChatState.hydrationQuietUntil),
+      );
       if (labelRow) {
         const secondary = labelChildren.find((child) =>
           child !== primary
@@ -2011,9 +2053,6 @@ function installWebMotion(): () => void {
           secondary: secondary?.textContent ?? '',
         };
         nextLabels.set(labelKey, current);
-        const toolChat = tool.closest(CHAT);
-        const toolChatState = toolChat ? chats.get(toolChat) : undefined;
-        const toolChatHydrating = Boolean(toolChat && (!toolChatState || Date.now() < toolChatState.hydrationQuietUntil));
         const tail = toolChat ? getChatTailState(toolChat) : null;
         const toolStreamItem = tool.closest('[data-testid="stream-item"]');
         const isLastTimelineItem = Boolean(
@@ -2027,6 +2066,7 @@ function installWebMotion(): () => void {
         const labelOccluded = isRectOccluded(rect(labelRow), collectOccluderRects(labelRow, MODAL_OCCLUDER));
         const shouldShimmer =
           canAnimate()
+          && !toolChatHydrating
           && getPreferences().timeline
           && Boolean(current.primary)
           && !labelOccluded
@@ -2118,9 +2158,12 @@ function installWebMotion(): () => void {
         }
       }
       const slot = row ? firstBoxChild(row) : null;
-      if (slot && !Array.from(slot.querySelectorAll('svg')).some(chevron)) slots.push(slot);
+      if (slot && !Array.from(slot.querySelectorAll('svg')).some(chevron)) {
+        slots.push(slot);
+        if (toolChatHydrating) hydratingSlots.add(slot);
+      }
     }
-    toolIcons = updateIcons(slots, toolIcons, allow);
+    toolIcons = updateIcons(slots, toolIcons, allow, (slot) => !hydratingSlots.has(slot));
     toolShimmers = nextShimmers;
     toolLabels = nextLabels;
     toolGroupItems = nextGroupItems;
@@ -2459,7 +2502,24 @@ function installWebMotion(): () => void {
       const layout = measureToolDetailLayout(owner, active);
       const detailChat = detail.closest(CHAT);
       const detailChatState = detailChat ? chats.get(detailChat) : undefined;
-      const detailChatHydrating = Boolean(detailChat && (!detailChatState || Date.now() < detailChatState.hydrationQuietUntil));
+      const detailChatHydrating = Boolean(
+        detailChat &&
+          (detailChat.getAttribute('data-native-polish-hydrating') === 'true' ||
+            !detailChatState ||
+            Date.now() < detailChatState.hydrationQuietUntil),
+      );
+      if (detailChatHydrating) {
+        for (const reveal of Array.from(toolDetailReveals)) {
+          if (
+            reveal.owner === owner ||
+            reveal.owner === previous?.owner ||
+            hasAncestor(reveal.root, [detail])
+          ) {
+            active.get(reveal.tintLayer)?.();
+          }
+        }
+        if (layout.scrollContent) riseFor(toolDetailRises, layout.scrollContent)?.cancel();
+      }
       const canAnimateTextReveal = allow && !detailChatHydrating && (getPreferences().messages || getPreferences().timeline);
       const canAnimateDetail = canAnimateTextReveal && Date.now() >= quietUntil;
       const manualDisclosure = pending?.disclosure?.element === detail.closest(TOOL);
@@ -2573,7 +2633,10 @@ function installWebMotion(): () => void {
     }
     for (const [detail, state] of toolDetailText) {
       if (!next.has(detail) && detail.isConnected) {
-        next.set(detail, state);
+        const detailChat = detail.closest(CHAT);
+        if (!detailChat || visibleChats.has(detailChat)) {
+          next.set(detail, state);
+        }
       }
     }
     toolDetailText = next;
@@ -2775,17 +2838,123 @@ function installWebMotion(): () => void {
       }
     }
   }
+  function isChatHistorySyncing(chat: Element): boolean {
+    const scope = chat.closest(PANE) ?? chat.parentElement ?? chat;
+    return Boolean(
+      all(scope, '[data-testid="agent-history-overlay"], [data-testid="load-older-history-spinner"]').some(
+        visible,
+      ),
+    );
+  }
+  function chatTextSignature(chat: Element, rows: Element[]): string {
+    const tailRows = rows.slice(-12);
+    let sig = `${rows.length}:`;
+    for (const row of tailRows) {
+      const id = row.getAttribute('data-history-row-id') ?? '';
+      const len = (row.textContent ?? '').length;
+      sig += `${id}=${len};`;
+    }
+    for (const stream of all(chat, '[data-testid="native-polish-streaming-assistant"]')) {
+      sig += `s=${(stream.textContent ?? '').length};`;
+    }
+    return sig;
+  }
+  function cancelChatMotion(chat: Element, rows: Element[], purgeToolText: boolean) {
+    const timeline = timelineFor(chat, rows);
+    const footer = footerFor(chat);
+    if (timeline) riseFor(timelineRises, timeline)?.cancel();
+    if (footer) riseFor(footerRises, footer)?.cancel();
+    chatDisclosureQuietUntil.delete(chat);
+    chatHeightAnimations.delete(chat);
+    for (const [el, stop] of Array.from(active.entries())) {
+      if (el === chat || hasAncestor(el, [chat])) stop();
+    }
+    for (const reveal of Array.from(toolDetailReveals)) {
+      if (hasAncestor(reveal.root, [chat]) || hasAncestor(reveal.owner, [chat])) {
+        active.get(reveal.tintLayer)?.();
+        reveal.root.remove();
+        ghosts.delete(reveal.root);
+        toolDetailReveals.delete(reveal);
+        reveal.restoreHost();
+      }
+    }
+    for (const ghostEl of Array.from(ghosts)) {
+      if (hasAncestor(ghostEl, [chat])) {
+        active.get(ghostEl)?.();
+        ghostEl.remove();
+        ghosts.delete(ghostEl);
+      }
+    }
+    if (purgeToolText) {
+      for (const detail of Array.from(toolDetailText.keys())) {
+        if (detail === chat || hasAncestor(detail, [chat])) {
+          toolDetailText.delete(detail);
+        }
+      }
+    }
+  }
+  function syncChatHydrationAttribute(chat: Element, hydrationQuietUntil: number, now: number) {
+    const existingTimer = hydrationTimers.get(chat);
+    if (now < hydrationQuietUntil) {
+      if (chat.getAttribute('data-native-polish-hydrating') !== 'true') {
+        chat.setAttribute('data-native-polish-hydrating', 'true');
+        decorations.set(chat, () => chat.removeAttribute('data-native-polish-hydrating'));
+      }
+      if (existingTimer) window.clearTimeout(existingTimer);
+      const delay = Math.max(16, hydrationQuietUntil - now + 16);
+      const timer = window.setTimeout(() => {
+        hydrationTimers.delete(chat);
+        if (disposed || suspended || !chat.isConnected) {
+          chat.removeAttribute('data-native-polish-hydrating');
+          return;
+        }
+        const state = chats.get(chat);
+        const currentNow = Date.now();
+        if (state && currentNow < state.hydrationQuietUntil) {
+          syncChatHydrationAttribute(chat, state.hydrationQuietUntil, currentNow);
+          return;
+        }
+        chat.removeAttribute('data-native-polish-hydrating');
+        if (visible(chat)) {
+          refreshAmbient(false, new Set<Region>(['tools', 'messages']));
+        }
+      }, delay);
+      hydrationTimers.set(chat, timer);
+    } else {
+      if (existingTimer) {
+        window.clearTimeout(existingTimer);
+        hydrationTimers.delete(chat);
+      }
+      if (chat.getAttribute('data-native-polish-hydrating') !== null) {
+        chat.removeAttribute('data-native-polish-hydrating');
+      }
+    }
+  }
   function updateMessages(allow: boolean) {
     const activeChats = live(CHAT);
+    const previousVisibleChats = visibleChats;
+    visibleChats = new Set(activeChats);
+    for (const prevChat of previousVisibleChats) {
+      if (!visibleChats.has(prevChat)) {
+        cancelChatMotion(prevChat, all(prevChat, HISTORY_ROW), true);
+      }
+    }
+    const chatHydrationUntil = new Map<Element, number>();
+    const chatTextSignatures = new Map<Element, string>();
+    const now = Date.now();
     for (const chat of activeChats) {
       const old = chats.get(chat);
+      const wasVisibleLastPass = previousVisibleChats.has(chat);
       syncUserMessagePrecondense(chat, old);
       const rows = all(chat, HISTORY_ROW);
       const contextKey = chatContextKey(chat);
       const currentRowIds = new Set(rows.map((row) => row.getAttribute('data-history-row-id') ?? '').filter(Boolean));
+      const textSignature = chatTextSignature(chat, rows);
+      chatTextSignatures.set(chat, textSignature);
+      const contextChanged = Boolean(old && old.contextKey !== contextKey);
       const conversationSwitched = Boolean(
         old && (
-          old.contextKey !== contextKey
+          contextChanged
           || (old.rowIds.size > 0 && currentRowIds.size === 0)
           || (
             old.rowIds.size > 0
@@ -2796,15 +2965,73 @@ function installWebMotion(): () => void {
           )
         ),
       );
-      if (conversationSwitched && old) {
-        const timeline = timelineFor(chat, rows);
+      const firstHistoryPopulation = Boolean(!old || (old.seen.size === 0 && rows.length > 0));
+      const isFirstLiveUserTurn = Boolean(
+        allow &&
+          firstHistoryPopulation &&
+          rows.length >= 1 &&
+          rows.length <= 2 &&
+          rows[0]?.querySelector(USER_MESSAGE) &&
+          !rows.some((row) => Boolean(row.querySelector('[data-testid="assistant-message"]'))),
+      );
+      const running = Boolean(chat.querySelector('[data-testid="turn-working-indicator"]'));
+      const liveTurn = running || Boolean(old?.running);
+      const addedRowCount = old
+        ? Array.from(currentRowIds).filter((id) => !old.rowIds.has(id)).length
+        : currentRowIds.size;
+      const removedRowCount = old
+        ? Array.from(old.rowIds).filter((id) => !currentRowIds.has(id)).length
+        : 0;
+      const hasStreamDom = Boolean(chat.querySelector('[data-testid="native-polish-streaming-assistant"]'));
+      const handoffActive = Boolean(!hasStreamDom && (old?.stream || (old?.handoff && old.handoff.expires > now)));
+      const prelimEnteringUserMessage = Boolean(
+        (old || isFirstLiveUserTurn) &&
+          wasVisibleLastPass &&
+          !conversationSwitched &&
+          !contextChanged &&
+          now >= (old?.hydrationQuietUntil ?? 0) &&
+          addedRowCount === 1 &&
+          removedRowCount === 0 &&
+          rows.some((row) => {
+            const id = row.getAttribute('data-history-row-id') ?? '';
+            return Boolean(id && !old?.seen.has(id) && row.querySelector(USER_MESSAGE));
+          }),
+      );
+      const suppressDisclosureMotion =
+        now < (chatDisclosureQuietUntil.get(chat) ?? 0) ||
+        Boolean(chatHeightAnimations.get(chat)?.size);
+      const hasManualDisclosureCapture = Boolean(
+        pending?.disclosure && (pending.disclosure.chat === chat || pending.disclosure.element.closest(CHAT) === chat),
+      );
+      const isHistorySyncing = isChatHistorySyncing(chat);
+      const hydrationQuietUntil = resolveChatHydrationQuietUntil({
+        now,
+        previousQuietUntil: old?.hydrationQuietUntil ?? 0,
+        hasPreviousChatState: Boolean(old),
+        wasVisibleLastPass,
+        contextChanged,
+        conversationSwitched,
+        firstHistoryPopulation,
+        isFirstLiveUserTurn,
+        isHistorySyncing,
+        addedRowCount,
+        removedRowCount,
+        hasEnteringUserMessage: prelimEnteringUserMessage,
+        handoffSwapCommit: handoffActive,
+        completedFooterPending: Boolean(old && !running && now < old.completedFooterPendingUntil),
+        handoffTransition: handoffActive,
+        suppressDisclosureMotion,
+        hasManualDisclosureCapture,
+        liveTurn,
+        textChanged: Boolean(old && old.textSignature !== textSignature),
+        scrollHeightDelta: old ? chat.scrollHeight - old.scrollHeight : 0,
+        scrollTopDelta: old ? chat.scrollTop - old.scrollTop : 0,
+      });
+      chatHydrationUntil.set(chat, hydrationQuietUntil);
+      syncChatHydrationAttribute(chat, hydrationQuietUntil, now);
+      if ((conversationSwitched || !wasVisibleLastPass || isHistorySyncing) && old) {
+        cancelChatMotion(chat, rows, conversationSwitched || !wasVisibleLastPass);
         const footer = footerFor(chat);
-        if (timeline) riseFor(timelineRises, timeline)?.cancel();
-        if (footer) riseFor(footerRises, footer)?.cancel();
-        chatDisclosureQuietUntil.delete(chat);
-        for (const [el, stop] of Array.from(active.entries())) {
-          if (el === chat || hasAncestor(el, [chat])) stop();
-        }
         old.contextKey = contextKey;
         old.rowIds = currentRowIds;
         old.seen = new Set(currentRowIds);
@@ -2828,7 +3055,7 @@ function installWebMotion(): () => void {
           for (const key of workedFooter.keys) old.seenWorkedFooters.add(key);
         }
         old.pending.clear();
-        old.running = Boolean(chat.querySelector('[data-testid="turn-working-indicator"]'));
+        old.running = running;
         old.completedFooterPendingUntil = 0;
         old.scrollTop = chat.scrollTop;
         old.compensatedScrollTop = chat.scrollTop;
@@ -2841,16 +3068,13 @@ function installWebMotion(): () => void {
         old.stream = null;
         old.handoff = null;
         old.handoffQuietUntil = 0;
-        old.hydrationQuietUntil = Date.now() + 500;
+        old.hydrationQuietUntil = hydrationQuietUntil;
         old.reflowQuietUntil = 0;
-      } else if (old && old.seen.size === 0 && rows.length > 0) {
-        const isFirstLiveUserTurn =
-          allow &&
-          rows.length <= 2 &&
-          Boolean(rows[0]?.querySelector(USER_MESSAGE)) &&
-          !rows.some((row) => Boolean(row.querySelector('[data-testid="assistant-message"]')));
-        if (!isFirstLiveUserTurn) {
-          old.hydrationQuietUntil = Date.now() + 500;
+        old.textSignature = textSignature;
+      } else if (old) {
+        old.hydrationQuietUntil = hydrationQuietUntil;
+        if (now < hydrationQuietUntil) {
+          cancelChatMotion(chat, rows, false);
         }
       }
     }
@@ -2914,13 +3138,9 @@ function installWebMotion(): () => void {
           rows[0]?.querySelector(USER_MESSAGE) &&
           !rows.some((row) => Boolean(row.querySelector('[data-testid="assistant-message"]'))),
       );
-      const hydrationQuietUntil =
-        firstHistoryPopulation && !isFirstLiveUserTurn
-          ? Math.max(old?.hydrationQuietUntil ?? 0, Date.now() + 500)
-          : isFirstLiveUserTurn
-            ? 0
-            : old?.hydrationQuietUntil ?? 0;
+      const hydrationQuietUntil = chatHydrationUntil.get(chat) ?? old?.hydrationQuietUntil ?? 0;
       const suppressHydrationMotion = Date.now() < hydrationQuietUntil;
+      if (suppressHydrationMotion) candidates.clear();
       const liveTurn = running || Boolean(old?.running);
       const hasEnteringUserMessage = Boolean(
         (old || isFirstLiveUserTurn) &&
@@ -2959,7 +3179,9 @@ function installWebMotion(): () => void {
         userScrolledUp: hasEnteringUserMessage ? false : old?.userScrolledUp,
         holdingPendingBottom,
       });
-      const userScrolledUp = followState.userScrolledUp;
+      const userScrolledUp = suppressHydrationMotion
+        ? (followState.atBottom ? false : Boolean(old?.userScrolledUp))
+        : followState.userScrolledUp;
       const wasFollowing = Boolean(old && Date.now() >= quietUntil && followState.wasFollowing);
       const atBottom = followState.atBottom || hasEnteringUserMessage;
       const streamIndex = rows.findIndex((row) => Boolean(row.querySelector('[data-testid="native-polish-streaming-assistant"]')));
@@ -3040,7 +3262,7 @@ function installWebMotion(): () => void {
           candidates.delete(id);
           const ownsTextFade = Boolean(row.querySelector('[data-testid="native-polish-streaming-assistant"]'));
           const ownsCompactionEntry = Array.from(enteringCompactions).some((item) => item.closest(HISTORY_ROW) === row);
-          if (!ownsTextFade && !ownsCompactionEntry && allow && getPreferences().messages && atBottom && Date.now() >= quietUntil && entered++ < 12) {
+          if (!suppressHydrationMotion && !ownsTextFade && !ownsCompactionEntry && allow && getPreferences().messages && atBottom && Date.now() >= quietUntil && entered++ < 12) {
             pendingRowEntrances.push({ row, isUserMessage });
           }
         }
@@ -3244,7 +3466,8 @@ function installWebMotion(): () => void {
       while (seenCompactions.size > 500) seenCompactions.delete(seenCompactions.values().next().value!);
       while (seenWorkedFooters.size > 1000) seenWorkedFooters.delete(seenWorkedFooters.values().next().value!);
       for (const id of candidates) if (!atBottom || !currentIds.has(id)) candidates.delete(id);
-      chats.set(chat, { contextKey, rowIds: currentIds, seen, seenUserMessages, seenCompactions, seenWorkedFooters, pending: candidates, running, completedFooterPendingUntil, scrollTop: currentScrollTop, compensatedScrollTop, pendingBottomUntil, userScrolledUp, maxScrollTop, scrollHeight: currentScrollHeight, clientHeight: currentClientHeight, clientWidth: currentClientWidth, footer, footerTop, stream, handoff, handoffQuietUntil, hydrationQuietUntil, reflowQuietUntil });
+      const textSignature = chatTextSignatures.get(chat) ?? chatTextSignature(chat, rows);
+      chats.set(chat, { contextKey, rowIds: currentIds, seen, seenUserMessages, seenCompactions, seenWorkedFooters, pending: candidates, running, completedFooterPendingUntil, scrollTop: currentScrollTop, compensatedScrollTop, pendingBottomUntil, userScrolledUp, maxScrollTop, scrollHeight: currentScrollHeight, clientHeight: currentClientHeight, clientWidth: currentClientWidth, footer, footerTop, stream, handoff, handoffQuietUntil, hydrationQuietUntil, reflowQuietUntil, textSignature });
     }
   }
   // ChatOutlineRail mounts `[data-testid="chat-outline-rail"]` inside its
@@ -3334,8 +3557,8 @@ function installWebMotion(): () => void {
     if (selected.has('panes')) updatePaneLayout(allow);
     if (selected.has('agents')) updateAgentStates(allow);
     if (selected.has('files')) updateFileStates(allow);
-    if (selected.has('tools')) updateToolStates(allow);
     if (selected.has('messages')) { updateMessages(allow); seedOutlineRails(); }
+    if (selected.has('tools')) updateToolStates(allow);
     if (selected.has('workspaces') || selected.has('tabs') || selected.has('panes')) schedulePanelBaseline();
   }
   function scheduleAmbient(selected: Region[] = regions) {
@@ -3689,9 +3912,12 @@ function installWebMotion(): () => void {
         deadline = window.setTimeout(clearCapture, 900);
       }
       if (structural || record.attributeName === 'aria-expanded' || target.matches(PANE) || target.querySelector(PANE)) schedule();
-      const meaningful = structural || record.type === 'characterData' || ['aria-expanded', 'aria-selected', 'aria-busy'].includes(record.attributeName ?? '');
-      if (target.closest(CHAT) || (structural && target.querySelector(CHAT))) {
-        if (meaningful || textual) {
+      const meaningful = structural || record.type === 'characterData' || ['aria-expanded', 'aria-selected', 'aria-busy', 'aria-hidden'].includes(record.attributeName ?? '');
+      const chatVisibilityChanged =
+        (record.attributeName === 'style' || record.attributeName === 'class' || record.attributeName === 'aria-hidden') &&
+        Boolean(target.matches(CHAT) || target.querySelector(CHAT));
+      if (target.closest(CHAT) || ((structural || chatVisibilityChanged) && target.querySelector(CHAT)) || chatVisibilityChanged) {
+        if (meaningful || textual || chatVisibilityChanged) {
           refreshChatNow = true;
         }
       } else if (target.closest(WORKSPACE_SCROLL)) {
@@ -3701,7 +3927,7 @@ function installWebMotion(): () => void {
       } else if (target.closest(FILE_TREE + ', ' + CHANGE_TREE)) {
         if (meaningful) scheduleAmbient(['files', 'controls']);
       } else if (target.closest(TAB_ROW)) {
-        if (meaningful || target.matches(TAB)) scheduleAmbient(['tabs', 'agents', 'controls']);
+        if (meaningful || target.matches(TAB)) scheduleAmbient(['tabs', 'agents', 'controls', 'tools', 'messages']);
       } else if (target.closest(FLOATING)) {
         if (meaningful || target.matches(FLOATING)) scheduleAmbient(['floating', 'controls', 'tools']);
       } else if (structural || target.matches(PANE) || target.querySelector(PANE)) {
@@ -3902,15 +4128,22 @@ function installWebMotion(): () => void {
     // their detached DOM and rebuild clean baselines on return.
     workspaceLists.clear(); tabRows.clear(); floating.clear(); paneBaseline.clear(); paneTransition = null;
     for (const rise of contentRises) rise.cancel();
+    for (const [chatEl, timer] of hydrationTimers) {
+      window.clearTimeout(timer);
+      chatEl.removeAttribute('data-native-polish-hydrating');
+    }
+    hydrationTimers.clear();
+    visibleChats.clear();
     fileIcons.clear(); toolIcons.clear(); toolShimmers.clear(); toolLabels.clear(); toolGroupItems.clear(); toolDetailText.clear(); toolDetailReveals.clear(); agentStates.clear();
     workspaceMeta.clear(); workspaceTitleBaseline.clear(); removeTitleCovers(); titleReveals.clear(); titleRevealKeys.clear();
   }
   function resumeMotion() {
     if (disposed || document.hidden || !document.hasFocus()) return;
     suspended = false; updateMotionFlags();
-    // Rebase once after host focus handling. Changes received in background
-    // appear immediately; they do not replay stale entrances or exits.
+    // Rebase synchronously and once more after host focus handling so changes
+    // received in background appear immediately and never replay stale motion.
     window.cancelAnimationFrame(passiveFrame); dirty.clear();
+    refreshAmbient(false);
     passiveFrame = window.requestAnimationFrame(() => { passiveFrame = 0; dirty.clear(); refreshAmbient(false); });
   }
   const onVisibility: Listener = () => { if (document.hidden) pauseMotion(); else resumeMotion(); };
@@ -3998,6 +4231,12 @@ function installWebMotion(): () => void {
     window.clearTimeout(scrollDeadline); dirty.clear();
     for (const rise of contentRises) rise.cancel();
     contentRises.clear();
+    for (const [chatEl, timer] of hydrationTimers) {
+      window.clearTimeout(timer);
+      chatEl.removeAttribute('data-native-polish-hydrating');
+    }
+    hydrationTimers.clear();
+    visibleChats.clear();
     workspaceLists.clear(); tabRows.clear(); floating.clear(); paneBaseline.clear(); fileIcons.clear(); toolIcons.clear(); toolShimmers.clear(); toolLabels.clear(); toolGroupItems.clear(); toolDetailText.clear(); toolDetailReveals.clear(); agentStates.clear();
     workspaceMeta.clear(); workspaceTitleBaseline.clear(); removeTitleCovers(); titleReveals.clear(); titleRevealKeys.clear(); shortcutBadges.clear(); outlineRails.clear();
     pending = null; treeTarget = null; stopAll(); stopOutlineRails();

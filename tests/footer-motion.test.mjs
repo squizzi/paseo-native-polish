@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CHAT_HYDRATION_QUIET_MS,
+  CHAT_HYDRATION_SETTLE_EXTENSION_MS,
   USER_MESSAGE_AFTER_FOOTER_SLIDE_DELAY_MS,
   WORKED_FOOTER_ENTRANCE_DURATION_MS,
   isFollowingScrollBottom,
+  resolveChatHydrationQuietUntil,
   resolveFollowOutputScroll,
   resolveStreamingAssistantGaps,
   resolveUserMessageEntranceDelayMs,
@@ -520,5 +523,73 @@ test("sending a user message while a Thinking panel height animation is active s
       hasManualDisclosureCapture: true,
     }),
     false,
+  );
+});
+
+test("chat hydration quiet window stops motion when returning to an inactive tab and extends while text settles", () => {
+  const now = 10_000;
+  const base = {
+    now,
+    previousQuietUntil: 0,
+    hasPreviousChatState: true,
+    wasVisibleLastPass: true,
+    contextChanged: false,
+    conversationSwitched: false,
+    isFirstLiveUserTurn: false,
+    isHistorySyncing: false,
+    addedRowCount: 0,
+    removedRowCount: 0,
+    scrollHeightDelta: 0,
+    scrollTopDelta: 0,
+    textChanged: false,
+  };
+
+  // Returning to a retained tab that was hidden on the previous pass arms the full hydration quiet window
+  const onTabReturn = resolveChatHydrationQuietUntil({
+    ...base,
+    wasVisibleLastPass: false,
+  });
+  assert.equal(onTabReturn, now + CHAT_HYDRATION_QUIET_MS);
+
+  // While inside the hydration quiet window, deferred <Freeze> text/height/scroll hydration extends the quiet period
+  const midHydrationNow = now + 600;
+  const extendedOnTextRehydration = resolveChatHydrationQuietUntil({
+    ...base,
+    now: midHydrationNow,
+    previousQuietUntil: onTabReturn,
+    textChanged: true,
+  });
+  assert.equal(
+    extendedOnTextRehydration,
+    midHydrationNow + CHAT_HYDRATION_SETTLE_EXTENSION_MS,
+  );
+
+  // Bulk history row hydration or daemon history sync indicator also arms the full quiet window
+  assert.equal(
+    resolveChatHydrationQuietUntil({
+      ...base,
+      addedRowCount: 3,
+    }),
+    now + CHAT_HYDRATION_QUIET_MS,
+  );
+  assert.equal(
+    resolveChatHydrationQuietUntil({
+      ...base,
+      isHistorySyncing: true,
+    }),
+    now + CHAT_HYDRATION_QUIET_MS,
+  );
+
+  // First live user turn on a brand-new conversation does not suppress live entrance motion
+  assert.equal(
+    resolveChatHydrationQuietUntil({
+      ...base,
+      hasPreviousChatState: false,
+      wasVisibleLastPass: false,
+      contextChanged: true,
+      isFirstLiveUserTurn: true,
+      addedRowCount: 1,
+    }),
+    0,
   );
 });

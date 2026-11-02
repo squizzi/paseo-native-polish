@@ -3,6 +3,8 @@ export type FooterMotionFrame = Record<string, string | number>;
 export const WORKED_FOOTER_ENTRANCE_DURATION_MS = 320;
 export const USER_MESSAGE_AFTER_FOOTER_SLIDE_DELAY_MS = 140;
 export const BOTTOM_SCROLL_EPSILON_PX = 8;
+export const CHAT_HYDRATION_QUIET_MS = 800;
+export const CHAT_HYDRATION_SETTLE_EXTENSION_MS = 400;
 
 const WORKED_FOOTER_RISE_KEYFRAMES: FooterMotionFrame[] = [
   { opacity: 0, transform: "translateY(6px)" },
@@ -295,4 +297,110 @@ export function shouldAllowFollowOutputRise(input: {
       (input.holdingPendingBottom && input.hasActiveTimelineRise)) &&
     !input.hasManualDisclosureCapture
   );
+}
+
+export interface ResolveChatHydrationQuietUntilInput {
+  now: number;
+  previousQuietUntil: number;
+  hasPreviousChatState: boolean;
+  wasVisibleLastPass: boolean;
+  contextChanged: boolean;
+  conversationSwitched: boolean;
+  firstHistoryPopulation: boolean;
+  isFirstLiveUserTurn: boolean;
+  isHistorySyncing?: boolean;
+  addedRowCount?: number;
+  removedRowCount?: number;
+  hasEnteringUserMessage?: boolean;
+  handoffSwapCommit?: boolean;
+  completedFooterPending?: boolean;
+  handoffTransition?: boolean;
+  suppressDisclosureMotion?: boolean;
+  hasManualDisclosureCapture?: boolean;
+  liveTurn?: boolean;
+  textChanged?: boolean;
+  scrollHeightDelta?: number;
+  scrollTopDelta?: number;
+}
+
+export function resolveChatHydrationQuietUntil(
+  input: ResolveChatHydrationQuietUntilInput,
+): number {
+  const previousQuietUntil = Number.isFinite(input.previousQuietUntil)
+    ? Math.max(0, input.previousQuietUntil)
+    : 0;
+  if (
+    input.isFirstLiveUserTurn &&
+    !input.contextChanged &&
+    !input.conversationSwitched &&
+    !input.isHistorySyncing
+  ) {
+    return 0;
+  }
+
+  const addedRowCount = Math.max(0, input.addedRowCount ?? 0);
+  const removedRowCount = Math.max(0, input.removedRowCount ?? 0);
+  const scrollHeightDelta = Number.isFinite(input.scrollHeightDelta)
+    ? input.scrollHeightDelta!
+    : 0;
+  const scrollTopDelta = Number.isFinite(input.scrollTopDelta)
+    ? input.scrollTopDelta!
+    : 0;
+
+  const isBulkHistoryRehydration =
+    !input.hasEnteringUserMessage &&
+    !input.handoffSwapCommit &&
+    (addedRowCount >= 2 || (addedRowCount >= 1 && removedRowCount >= 1));
+
+  const shouldStartFullQuietWindow =
+    ((!input.wasVisibleLastPass ||
+      input.contextChanged ||
+      input.conversationSwitched ||
+      !input.hasPreviousChatState ||
+      input.firstHistoryPopulation) &&
+      !input.isFirstLiveUserTurn) ||
+    Boolean(input.isHistorySyncing) ||
+    isBulkHistoryRehydration;
+
+  if (shouldStartFullQuietWindow) {
+    return Math.max(previousQuietUntil, input.now + CHAT_HYDRATION_QUIET_MS);
+  }
+
+  const isCurrentlyHydrating = input.now < previousQuietUntil;
+  if (isCurrentlyHydrating && !input.hasManualDisclosureCapture) {
+    const settlingActivity = input.liveTurn
+      ? (removedRowCount > 0 && !input.handoffSwapCommit) ||
+        Math.abs(scrollHeightDelta) > 120 ||
+        Math.abs(scrollTopDelta) > 120
+      : addedRowCount > 0 ||
+        removedRowCount > 0 ||
+        Boolean(input.textChanged) ||
+        Math.abs(scrollHeightDelta) > 1 ||
+        Math.abs(scrollTopDelta) > 1;
+    if (settlingActivity) {
+      return Math.max(
+        previousQuietUntil,
+        input.now + CHAT_HYDRATION_SETTLE_EXTENSION_MS,
+      );
+    }
+  }
+
+  const isUnexpectedIdleHistorySync =
+    (addedRowCount > 0 || removedRowCount > 0) &&
+    !input.isFirstLiveUserTurn &&
+    !input.liveTurn &&
+    !input.completedFooterPending &&
+    !input.handoffTransition &&
+    !input.hasEnteringUserMessage &&
+    !input.suppressDisclosureMotion &&
+    !input.hasManualDisclosureCapture;
+
+  if (isUnexpectedIdleHistorySync) {
+    return Math.max(
+      previousQuietUntil,
+      input.now + CHAT_HYDRATION_SETTLE_EXTENSION_MS,
+    );
+  }
+
+  return previousQuietUntil;
 }
