@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.17 · 2026-11-01
+
+- Animate filtered projects added to and removed from the sidebar. When projects are shown or hidden using sidebar filters, their groups fade and slide into or out of place, and neighboring rows transition smoothly just like project creation and removal.
+- Cascade sidebar items in when a sidebar opens. Navigation rows, section titles, projects, workspaces and footer buttons fade and slide in one after another, top to bottom and left to right within a row, so the sidebar reads as unfolding rather than appearing at once. The Explorer does the same for its tabs and Files/Changes tree rows, mirrored to slide in from the right; other panels it hosts, such as terminals, appear with the drawer. Long lists compress the stagger so the last visible row still starts within about a quarter second. Previewing a hidden sidebar from the window edge cascades its items the same way as it slides in. It uses the sidebar motion setting and respects Reduce Motion.
+- Keep the window header still while a sidebar is previewed from the window edge. Opening the left sidebar removes the header's traffic-light space and opening the Explorer moves its toggle out of the header, so the title and right-hand buttons jumped while the preview slid over them. The preview now holds them in place until it closes.
+- Add an edge peek sensitivity setting. It sets how close to the window edge the pointer must rest to preview a hidden sidebar: 4 px, the default 7 px, or 14 px. A wider zone is easier to hit but takes the outermost pixels of HTML previews for hover.
+- Animate the shortcut numbers that appear in the sidebar while Cmd/Ctrl is held. Each workspace row's diff stat or timestamp rolls up and out as its number rolls in, and releasing the key reverses it, so the swap reads as one value changing instead of a jump cut. Project rows fade their numbers in and out. It uses the sidebar motion setting and respects Reduce Motion.
+- Keep the left sidebar's rows aligned while it collapses. On macOS the sidebar drops its traffic-light row and the styles for it before it is hidden, so navigation rows and workspaces jumped up mid-animation. The exit now shrinks a copy of the open layout with its styles and scroll position intact.
+
 ## 0.4.16 · 2026-10-21
 
 - Stop applying overlay entrance and exit animation to hover tooltips. Tooltip text now follows Paseo's own hover lifecycle instead of flashing on pointer enter or leave. Thanks to @squizzi for the fix in #1.

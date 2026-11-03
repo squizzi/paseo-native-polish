@@ -3,6 +3,6 @@
   "name": "Native Polish",
   "description": "Motion for sidebars, tabs, panes, overlays, file trees and agent activity.",
   "requirements": {
-    "paseo": ">=0.11.2"
+    "paseo": ">=0.13.0"
   }
 }

@@ -8,20 +8,20 @@ Motion for Paseo's existing interface. Sidebars, panes, tabs and disclosures tra
 
 | Area | Behavior |
 | --- | --- |
-| Sidebars | Animate left sidebar and Explorer expansion/collapse, including adjacent pane resizing. Workspace rows fade in on creation and out on archive; neighboring rows move into place. |
+| Sidebars | Animate left sidebar and Explorer expansion/collapse, including adjacent pane resizing. Opening a sidebar cascades its visible items in, top to bottom and outward from its opening edge: left to right for the left sidebar, right to left for the Explorer’s tabs and Files/Changes trees. Workspace rows fade in on creation and out on archive; neighboring rows move into place. Holding Cmd/Ctrl rolls each row's diff stat or timestamp up into its shortcut number, and releasing rolls it back. |
 | Edge preview | Hover at a hidden desktop sidebar’s window edge for a temporary, interactive overlay. Leaving restores the closed state without resizing the canvas. |
 | Panes | Animate split, close, maximize and restore. |
 | Tabs | Animate opening, closing and reordering; transition selection colors. |
 | Explorer and timeline | Animate tree expansion/collapse, folder arrows, tool calls and thinking details. |
 | Overlays and controls | Short menu/dialog transitions, button press feedback and hover changes. Tooltips keep Paseo's own motion and hover lifecycle. |
-| Agent activity | Transition status changes and fade newly appended messages once near the conversation tail. |
+| Agent activity | Reveal coalesced streamed Markdown arrivals with core's opacity fade, plus core-style snap-to-line growth. Reveal tool labels and summaries at their natural text width as details arrive. Transition status changes and newly appended messages. |
 | Scrolling | Damped edge rebound for agent conversations, workspace lists, Files, Changes, Markdown previews and editable/read-only file Source views. Normal scrolling and inertia stay with Paseo. |
 
-Workspace rows also move smoothly when pinned, unpinned or moved between status groups. Project creation/removal animates the group and surrounding list. These transitions use the sidebar motion setting.
+Workspace rows also move smoothly when pinned, unpinned or moved between status groups. Project creation/removal animates the group and surrounding list, and projects added or removed through sidebar filters animate the same way. These transitions use the sidebar motion setting.
 
-**Edge preview** has its own switch and is enabled by default. Move a mouse within 7 px of the left or right window edge, below the titlebar, and pause for 180 ms. The hidden sidebar slides over the canvas. Leaving allows 260 ms to return before it closes; Escape dismisses it until the mouse leaves the edge. Open menus and focused inputs keep the preview available while you interact. Clicking the normal sidebar toggle or using its shortcut can open the regular layout dock. Already-open sidebars and compact/touch layouts retain their behavior.
+**Edge preview** has its own switch and is enabled by default. Move a mouse within 7 px of the left or right window edge, below the titlebar, and pause for 180 ms. **Edge peek sensitivity** sets that edge zone to 4 px (Low), 7 px (Normal) or 14 px (High). The hidden sidebar slides over the canvas and cascades its items in like a regular open. Leaving allows 260 ms to return before it closes; Escape dismisses it until the mouse leaves the edge. Open menus and focused inputs keep the preview available while you interact. Clicking the normal sidebar toggle or using its shortcut can open the regular layout dock. Already-open sidebars and compact/touch layouts retain their behavior.
 
-This runs in the client for local and remote workspaces. Transparent 7 px gutters reserve the activation edges while the corresponding sidebar is hidden, including above sandboxed HTML previews. The preview contents and sandbox are untouched; controls within those outer gutters receive hover through the plugin instead of the underlying page. Moving back into the HTML content starts the usual close delay.
+This runs in the client for local and remote workspaces. Transparent gutters as wide as the edge zone reserve the activation edges while the corresponding sidebar is hidden, including above sandboxed HTML previews. The preview contents and sandbox are untouched; controls within those outer gutters receive hover through the plugin instead of the underlying page. Moving back into the HTML content starts the usual close delay.
 
 The preview temporarily opens the real host sidebar, places it outside flex layout before the opening commit, and closes it again on exit. Sidebar visibility is transiently updated in Paseo during the preview; no copied controls or private React state are used.
 
@@ -33,11 +33,11 @@ File scrolling covers rendered Markdown and editable/read-only Source views for 
 
 The desktop fallback is an approximation: Paseo's Electron window does not currently enable `scrollBounce`, and a client plugin cannot change that main-process option. Exact macOS rebound requires host support.
 
-Streaming updates are coalesced by surface; wheel bursts rebase list snapshots after input settles. Text editing, selection and IME composition bypass global motion captures. Editor/terminal rendering does not trigger app layout scans. Motion and scans pause when the window loses focus or becomes hidden; returning rebases the current UI without replaying background changes. Tree commits reuse one bounded layout capture.
+Streaming assistant rows render with Paseo's host `Markdown` component while live and reveal each coalesced text arrival by fading inert background covers over the newly appended glyph ranges, keeping Paseo as the sole Markdown paint owner. Completed rows return to Paseo's default timeline item; the adapter suppresses a second message entrance at that handoff. Streaming updates are coalesced by surface; wheel bursts rebase list snapshots after input settles. Text editing, selection and IME composition bypass global motion captures. Editor/terminal rendering does not trigger app layout scans. Motion and scans pause when the window loses focus or becomes hidden; returning rebases the current UI without replaying background changes. Tree commits reuse one bounded layout capture.
 
 ## Install
 
-Requires **Paseo 0.11.2** or later, with plugins enabled on the target daemon. The DOM adapter was developed against 0.11.2.
+Requires **Paseo 0.13.0** or later, with plugins enabled on the target daemon.
 
 ```sh
 paseo plugin add git:JasprW/paseo-native-polish
@@ -77,6 +77,7 @@ paseo plugin reload paseo-native-polish
 index.client.tsx       Client registration and lifecycle
 client/settings.tsx   Settings UI using Paseo components
 client/preferences.ts Reactive preferences
+client/streaming-markdown.tsx Live streaming assistant item using Paseo's Markdown component
 client/web.ts         Web-only DOM and animation adapter
 client/elastic-scroll.ts Web scroll boundary spring and cleanup
 client/edge-peek.ts    Temporary desktop edge preview and restoration
