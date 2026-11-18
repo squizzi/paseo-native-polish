@@ -75,6 +75,7 @@ export function toolDetailShimmerStyle(input: {
 }
 
 export const TOOL_LABEL_UPDATE_DURATION_MS = 150;
+export const TOOL_LABEL_TEXT_UPDATE_DURATION_MS = 240;
 export const TOOL_LABEL_UPDATE_FRAMES: ToolDetailTextFrame[] = [
   { opacity: 0, transform: "translateY(4px)" },
   { opacity: 1, transform: "translateY(0)" },
@@ -110,7 +111,7 @@ export function toolLabelUpdateTransition(
     animateSecondary,
     frames: TOOL_LABEL_UPDATE_FRAMES,
     shimmerFrames: TOOL_LABEL_SHIMMER_UPDATE_FRAMES,
-    durationMs: TOOL_LABEL_UPDATE_DURATION_MS,
+    durationMs: TOOL_LABEL_TEXT_UPDATE_DURATION_MS,
   };
 }
 
@@ -255,17 +256,21 @@ function findUnfinalizedLinkStart(source: string, scanStart: number): number {
     const prefixSlice = source.slice(scanStart, prefixEnd);
     const filePrefixMatch = prefixSlice.match(/(?:^|(?<=[\s([{"']))file:$/i);
     const tokenStart = filePrefixMatch ? prefixEnd - filePrefixMatch[0].length : prefixEnd;
+    const precededByIdentifier =
+      !filePrefixMatch &&
+      !hasBangPrefix &&
+      tokenStart > scanStart &&
+      /[A-Za-z0-9_)\]]/.test(source[tokenStart - 1] ?? "");
 
     const labelEnd = findClosedLinkLabelEnd(source, index);
     if (labelEnd === -1) {
       const openLabel = source.slice(index + 1);
-      if (/^\d+$/.test(openLabel) && !filePrefixMatch && !hasBangPrefix) {
+      if (/^\d+$/.test(openLabel) && precededByIdentifier) {
         continue;
       }
       return tokenStart;
     }
 
-    const labelContent = source.slice(index + 1, labelEnd);
     const nextChar = source[labelEnd + 1];
     if (nextChar === "(") {
       if (!hasClosedLinkDestination(source, labelEnd + 1)) {
@@ -280,14 +285,9 @@ function findUnfinalizedLinkStart(source: string, scanStart: number): number {
     }
     if (labelEnd === source.length - 1) {
       // A closed `[label]` at the very end of the stream may be waiting on
-      // `(file:///...)` in the next delta. Hold it unless it is a plain numeric
-      // index like `items[0]` with no `file:` or `!` prefix.
-      const precededByIdentifier =
-        !filePrefixMatch &&
-        !hasBangPrefix &&
-        tokenStart > scanStart &&
-        /[A-Za-z0-9_)\]]/.test(source[tokenStart - 1] ?? "");
-      if (!precededByIdentifier && (!/^\d+$/.test(labelContent) || Boolean(filePrefixMatch) || hasBangPrefix)) {
+      // `(file:///...)` in the next delta. Preserve identifier suffixes such
+      // as `items[0]` while holding standalone labels until the next delta.
+      if (!precededByIdentifier) {
         return tokenStart;
       }
     }

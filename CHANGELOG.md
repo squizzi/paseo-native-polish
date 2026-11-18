@@ -2,6 +2,15 @@
 
 ## 0.4.22 · 2026-11-17
 
+- Keep long user messages readable while Paseo's expansion control is unavailable.
+- Keep overlapping streamed-text reveals aligned until the last reveal finishes.
+- Stop follow-output motion when scrolling upward so the conversation stays still during manual scrolling.
+- Ease new live tool summaries into view, while leaving loaded history and remounted summaries still.
+- Keep tool details visible inside their collapsing group when closed, including their scrolled position and styles.
+- Slow tool summary text changes to 240 ms so the transition is easier to follow.
+- Keep numeric link labels hidden until their destinations arrive so streamed text does not flash and retract.
+- Stop tool detail height animations at the updated content height when a target changes, avoiding overshoot and snapping.
+- Release finished conversation motion controllers so closed conversations do not remain in memory.
 - Stop the settings sidebar from replaying its opening animation. The entrance now runs once even when its initial width is zero.
 
 ## 0.4.21 · 2026-11-17

@@ -4,7 +4,7 @@ import {
   TOOL_DETAIL_TEXT_BLUR_PX,
   TOOL_DETAIL_TEXT_FADE_DURATION_MS,
   TOOL_LABEL_SHIMMER_UPDATE_FRAMES,
-  TOOL_LABEL_UPDATE_DURATION_MS,
+  TOOL_LABEL_TEXT_UPDATE_DURATION_MS,
   TOOL_LABEL_UPDATE_FRAMES,
   TOOL_SHIMMER_DURATION_MS,
   TOOL_SHIMMER_PEAK_WIDTH_PX,
@@ -208,7 +208,7 @@ test("Tool labels and summaries fade up from the bottom when their text changes"
       animateSecondary: false,
       frames: TOOL_LABEL_UPDATE_FRAMES,
       shimmerFrames: TOOL_LABEL_SHIMMER_UPDATE_FRAMES,
-      durationMs: TOOL_LABEL_UPDATE_DURATION_MS,
+      durationMs: TOOL_LABEL_TEXT_UPDATE_DURATION_MS,
     },
   );
 
@@ -228,7 +228,7 @@ test("Tool labels and summaries fade up from the bottom when their text changes"
         { transform: "translateY(4px)" },
         { transform: "translateY(0)" },
       ],
-      durationMs: 150,
+      durationMs: 240,
     },
   );
 });
@@ -388,6 +388,19 @@ test("finalizeStreamingMarkdown withholds unfinalized file link metadata and inl
     finalizeStreamingMarkdown("```ts\nconst item = list[0"),
     "```ts\nconst item = list[0",
   );
+});
+
+test("numeric link labels never retract during streaming", () => {
+  const text = "x [1](https://a.b)";
+  let previous = "";
+  for (let end = 1; end <= text.length; end += 1) {
+    const current = finalizeStreamingMarkdown(text.slice(0, end));
+    assert.ok(current.startsWith(previous), `${JSON.stringify(previous)} retracted to ${JSON.stringify(current)}`);
+    previous = current;
+  }
+  assert.equal(previous, text);
+  assert.equal(finalizeStreamingMarkdown("items[0"), "items[0");
+  assert.equal(finalizeStreamingMarkdown("items[0]"), "items[0]");
 });
 
 test("toolDetailTextTransition recovers the entering link text when previous snapshot had unfinalized link syntax", () => {
