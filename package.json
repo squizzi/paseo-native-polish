@@ -1,7 +1,7 @@
 {
   "name": "paseo-native-polish",
   "private": true,
-  "version": "0.4.16",
+  "version": "0.4.22",
   "files": [
     "paseo-plugin.json",
     "OVERVIEW.md",
@@ -11,12 +11,22 @@
     "NOTICE"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:chat-disclosure-motion": "node --experimental-strip-types tests/chat-disclosure-motion.test.mjs",
+    "test:motion-runtime": "node --experimental-strip-types tests/motion-runtime.test.mjs",
+    "test:outline-rail-motion": "node --experimental-strip-types tests/outline-rail-motion.test.mjs",
+    "test:sidebar-cascade": "node --experimental-strip-types tests/sidebar-cascade.test.mjs",
+    "test:sidebar-panels": "node --experimental-strip-types tests/sidebar-panels.test.mjs",
+    "test:sidebar-shortcuts": "node --experimental-strip-types tests/sidebar-shortcuts.test.mjs",
+    "test:tree-motion": "node --experimental-strip-types tests/tree-motion.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:sidebar-browser": "node tests/sidebar-browser.test.mjs"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.11.2",
+    "@getpaseo/plugin": "0.13.0",
     "@tanstack/react-query": "^5.90.11",
     "@types/react": "~19.2.0",
+    "playwright": "^1.61.1",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.9.3",

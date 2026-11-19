@@ -1,21 +1,22 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsCard, SettingsSection, SettingsSwitch, SettingsSelect } from "@getpaseo/plugin/client/ui";
 import { Platform, Text, View } from "react-native";
-import { setPreferences, usePreferences } from "./preferences";
+import { edgePeekWidths, setPreferences, usePreferences } from "./preferences";
 export function MotionSettings({ theme, layout }: PluginSurfaceProps) {
   const values = usePreferences();
   return (
     <View style={{ gap: 20, paddingVertical: layout.compact ? 12 : 20 }}>
       <Text style={{ color: theme.colors.foregroundMuted, lineHeight: 21 }}>
         {Platform.OS === "web"
-          ? "Responsive motion for Paseo. Changes apply immediately in this client. System Reduce Motion is always respected."
-          : "This first version adds motion to the desktop and web client. Mobile keeps its existing native transitions."}
+          ? "Responsive motion and smooth streaming text for Paseo. Changes apply immediately in this client. System Reduce Motion is always respected."
+          : "Native Polish is designed for Paseo's desktop and web app. Mobile keeps its existing core rendering and native transitions."}
       </Text>
       <SettingsSection title="Motion">
         <SettingsCard>
           <SettingsSwitch label="Enable motion" value={values.enabled} onValueChange={(enabled) => setPreferences({ ...values, enabled })} />
           <SettingsSwitch label="Sidebars, sections and workspace rows" value={values.sidebars} onValueChange={(sidebars) => setPreferences({ ...values, sidebars })} />
           <SettingsSwitch label="Peek at hidden sidebars from screen edges" value={values.edgePeek} onValueChange={(edgePeek) => setPreferences({ ...values, edgePeek })} />
+          <SettingsSelect label="Edge peek sensitivity" value={values.edgePeekSensitivity} options={[{ label: `Low · ${edgePeekWidths.low} px`, value: "low" }, { label: `Normal · ${edgePeekWidths.normal} px`, value: "normal" }, { label: `High · ${edgePeekWidths.high} px`, value: "high" }]} onValueChange={(sensitivity) => setPreferences({ ...values, edgePeekSensitivity: sensitivity === "low" || sensitivity === "high" ? sensitivity : "normal" })} />
           <SettingsSwitch label="Explorer file trees" value={values.trees} onValueChange={(trees) => setPreferences({ ...values, trees })} />
           <SettingsSwitch label="Tool calls and thinking" value={values.timeline} onValueChange={(timeline) => setPreferences({ ...values, timeline })} />
           <SettingsSwitch label="Split, close, maximize and restore panes" value={values.panes} onValueChange={(panes) => setPreferences({ ...values, panes })} />
